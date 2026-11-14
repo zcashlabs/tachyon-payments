@@ -302,8 +302,12 @@ A row holds `SLOTS = floor(8192 / ENTRY_BYTES)` fixed-size entries.
 
 - Occupied entries come first, sorted ascending by `(key, ordinal)`.
 - Remaining slots and the row tail are zero. An all-zero entry is empty; no
-  valid entry is all zero, because every entry begins with a nonzero key
-  (a key of all zero bytes is rejected at ingestion).
+  valid entry is all zero, because every entry begins with a nonzero key.
+  A key of all zero bytes is rejected at ingestion: in memo and first-contact
+  an entry whose `key16` is all zero makes its envelope invalid (section 5.2);
+  in tachygram an all-zero tachygram is an integrity fault handled like a
+  duplicate (section 8.3); in registry the registration is refused
+  (section 9.3).
 - A row that violates any of this is non-canonical. Publisher, query host and
   client each MUST validate rows they produce or decode, as Status
   `decode_row` does.
@@ -334,10 +338,18 @@ of epochs (first-contact) or a chunk (registry). Each scope has a `scope_id`
 (u64) and is split into `n_buckets` tables, `n_buckets ∈ {1, 2, 4, …, 64}`.
 
 ```
-h      = SHA-256(domain || genesis_hash(32) || scope_id(u64) || seed(u32) || key)
-bucket = u32_le(h[4..8]) mod n_buckets
-row    = u32_le(h[0..4]) mod rows
+h(s)   = SHA-256(domain || genesis_hash(32) || scope_id(u64) || s(u32) || key)
+bucket = u32_le(h(scope_seed)[4..8]) mod n_buckets
+row_k  = u32_le(h(seed_k)[0..4]) mod rows        for segment k of that bucket
 ```
+
+- `key` is `key16` for memo, first-contact and registry, and the full 32-byte
+  tachygram for tachygram. `genesis_hash` is in protocol order (section 3).
+- `scope_seed` is the seed of segment 0. It is the same in every bucket of the
+  scope, so a client computes the bucket once, from any segment-0 table of the
+  scope. `seed_k` is the `seed` of segment `k` of that bucket, so the client
+  computes a row separately for each segment it queries. A key's bucket never
+  depends on a segment seed.
 
 | Product | `domain` |
 |---|---|
@@ -357,13 +369,24 @@ row    = u32_le(h[0..4]) mod rows
 
 ### 6.4 Seeds, overflow and segments
 
-- The publisher uses the smallest `seed` in `0..64` for which no row in any
-  bucket exceeds `SLOTS`.
-- If no seed works, the publisher places as many entries as fit, in ordinal
-  order, under `seed = 0`, and moves the rest to a further **segment** of the
-  same bucket, built the same way with its own seed. At most
-  `MAX_SEGMENTS = 8` segments per bucket; beyond that the publication fails,
-  the previous publication keeps serving and an alert is raised.
+- `scope_seed` is the smallest `s` in `0..MAX_SEEDS` for which, with bucket
+  and row both computed under `s`, no row in any bucket exceeds `SLOTS`. Each
+  bucket then has exactly one segment, with `seed = scope_seed`.
+- If no seed works, `scope_seed = 0` and buckets are assigned under seed 0.
+  Each bucket's segment 0 is filled under seed 0 by taking the bucket's entries
+  in ordinal order and placing each in its row if that row has a free slot. An
+  entry whose row is full **spills**, in ordinal order, to the next
+  **segment** of the same bucket.
+- Segment `k ≥ 1` of a bucket takes the entries spilled from segment `k - 1`.
+  Its seed is the smallest `s` in `0..MAX_SEEDS` under which all of them fit
+  (rows computed with `h(s)`). If none fits, it is filled under seed 0 the same
+  way as segment 0, and its own spill goes to segment `k + 1`.
+- Entries are taken in ordinal order, so every entry of a key in segment `k`
+  has a lower ordinal than every entry of that key in segment `k + 1`. A client
+  that concatenates its per-segment results in segment order therefore returns
+  them in ordinal order.
+- At most `MAX_SEGMENTS = 8` segments per bucket; beyond that the publication
+  fails, the previous publication keeps serving and an alert is raised.
 - A client MUST query every segment of the bucket it selects. Segment counts
   are public in the map.
 - Entries are never evicted. Status's eviction rule does not apply, because
