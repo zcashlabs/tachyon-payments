@@ -1,0 +1,4 @@
+**/target/
+/.local-pir
+.DS_Store
+__pycache__/

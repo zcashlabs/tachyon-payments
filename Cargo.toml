@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    # Shared libraries.
+    "src/shared/tachyon-chain",
+    # Tools.
+    "tools/fixtures",
+]
+
+# Shared crates reused from wallet-pir, pinned to one revision (spec section 4.3).
+[workspace.dependencies]
+pir-publication = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-pipeline = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-sync-manager = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-service-discovery = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-control = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-observability = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-node-rpc = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+pir-publisher = { git = "https://github.com/valargroup/wallet-pir", rev = "40b0ba6a26f87fe0aaa694602879f105abcd218f" }
+# Native 8-bit PIR profile, at the versions wallet-pir pins.
+zakura-pir-protocol = { version = "=0.0.1-rc5", default-features = false }
+zakura-pir-query-server = { version = "=0.0.1-rc5", default-features = false }
+zakura-pir-server-core = { version = "=0.0.1-rc5", default-features = false }
+zakura-pir-publisher = { version = "=0.0.1-rc5", default-features = false }
+zakura-pir-client = { version = "=0.0.1-rc5", default-features = false }
+reinspiring = "=0.1.3-rc.1"
+
+# Same block as wallet-pir (spec section 4.3).
+[patch.crates-io]
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+inspiring = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+reinspiring = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+simplepir-kernel = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+
+# Profiles copied from wallet-pir (spec section 4.4).
+[profile.dev.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
+[profile.test.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
+# Deploy artifacts: maximum optimization, slow to link.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test]
+opt-level = 1
+
+# Optimized codegen without whole-program LTO, for the test tiers.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
