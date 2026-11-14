@@ -121,6 +121,20 @@ The node does not serve `gettachyoninfo` on the public RPC port. The services
 depend only on `getblockchaininfo`, `getblockcount`, `getblockhash` and
 `getblock` at verbosity 2.
 
+Byte order of 32-byte values:
+
+- **Block hashes and transaction ids** (including `genesis_hash`, `anchor_hash`
+  and `prev`) are held in **protocol order**, the reverse of the hex the node's
+  RPC prints, as `wallet-pir`'s chain reader (`pir-chain/src/hash.rs`) does.
+  Every hash input in this document (placement, section 6.3) uses protocol
+  order. JSON documents (the map, configuration) write them in **display
+  order**, the same hex the node prints, so an operator can compare them with
+  the node and the explorer directly.
+- **Tachygrams, anchors, tags and digests** are not reversed: their bytes are
+  the RPC hex decoded left to right. The testnet confirms this for tachygrams:
+  every sampled proof stamp lists them in ascending order of that hex, which is
+  the ascending byte order the draft ZIPs require.
+
 ## 4. Architecture
 
 ### 4.1 Processes
