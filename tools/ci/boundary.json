@@ -1,0 +1,46 @@
+{
+  "comment": "Package classification for tools/ci/boundary.py (spec section 4.2). Every workspace package must be listed under packages with its directory; a listed package that is not yet in the workspace is skipped as planned. Add a new crate here, and to serving, chain_or_ingestion or a family where it belongs, in the same change that adds it to the workspace.",
+  "packages": {
+    "tachyon-chain": "src/shared/tachyon-chain",
+    "tachyon-pir-protocol": "src/shared/tachyon-pir-protocol",
+    "tachyon-pir-table": "src/shared/tachyon-pir-table",
+    "memo-store": "src/memo/memo-store",
+    "memo-publisher": "src/memo/memo-publisher",
+    "tachygram-store": "src/tachygram/tachygram-store",
+    "tachygram-publisher": "src/tachygram/tachygram-publisher",
+    "registry-store": "src/registry/registry-store",
+    "registry-publisher": "src/registry/registry-publisher",
+    "tachyon-pir-publisher": "src/tachyon-pir-publisher",
+    "tachyon-pir-query-server": "src/tachyon-pir-query-server",
+    "tachyon-pir-cli": "tools/client",
+    "tachyon-pir-e2e-tests": "tools/e2e-tests",
+    "tachyon-fixtures": "tools/fixtures"
+  },
+  "external": {
+    "pir-node-rpc": "wallet-pir's bounded node JSON-RPC transport; only tachyon-chain wraps it",
+    "pir-publisher": "wallet-pir's publisher host library (run_registered); only the publisher side uses it"
+  },
+  "serving": [
+    "tachyon-pir-protocol",
+    "tachyon-pir-table",
+    "tachyon-pir-query-server"
+  ],
+  "chain_or_ingestion": [
+    "tachyon-chain",
+    "memo-store",
+    "memo-publisher",
+    "tachygram-store",
+    "tachygram-publisher",
+    "registry-store",
+    "registry-publisher",
+    "tachyon-pir-publisher",
+    "pir-node-rpc",
+    "pir-publisher",
+    "tachyon-fixtures"
+  ],
+  "families": {
+    "memo": ["memo-store", "memo-publisher"],
+    "tachygram": ["tachygram-store", "tachygram-publisher"],
+    "registry": ["registry-store", "registry-publisher"]
+  }
+}
