@@ -1,0 +1,101 @@
+{
+  "captured_at": "2026-11-14T16:39:17Z",
+  "node_url": "http://tachyscan.cnode.phd:18232",
+  "methods": [
+    "getblock",
+    "getblockchaininfo",
+    "getblockcount",
+    "getblockhash"
+  ],
+  "tip": {
+    "height": 40295,
+    "hash": "12a3e1410d735294ab607da65d8e471183c3e61e3be4f5ebdff1d1203cd794b9"
+  },
+  "genesis_hash": "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
+  "getblockchaininfo": {
+    "file": "getblockchaininfo.json",
+    "sha256": "26fd43b26c83fc373180d412c65360b31eba9154a4ef43723c4f812eb57f1326"
+  },
+  "blocks": [
+    {
+      "height": 0,
+      "hash": "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
+      "file": "block-0.json",
+      "bytes": 5688,
+      "sha256": "e567a0ac7c5c73c9b9b55d6f8d42846c2139fcef88c3fa3c79d5932d64736c60",
+      "reason": "genesis: no previousblockhash; its hash is the network's genesis_hash"
+    },
+    {
+      "height": 8,
+      "hash": "70b6654e77c2b6bff9589aa4a102169296c799b8bf20f22c6acdbaf46b3a9111",
+      "file": "block-8.json",
+      "bytes": 5700,
+      "sha256": "4273615bfbbb2e5d3a5449b98e5c45b72543607dff53d1f4a7fa4e523e961d28",
+      "reason": "NuTachyon activation block (pool height 0, epoch 0); no Tachyon transactions"
+    },
+    {
+      "height": 109,
+      "hash": "c81dc9570c1c0a9fe1df9e1e9124922eb34e3e0e9a1a2f807e55357e04cfd693",
+      "file": "block-109.json",
+      "bytes": 10309,
+      "sha256": "0823e65926c32d7839233460bd30e8d20f3740631bbbedc51df3d7ce1027191a",
+      "reason": "first block with Tachyon transactions; smallest proof stamp seen (3 tachygrams, odd)"
+    },
+    {
+      "height": 148,
+      "hash": "dc85e3bec2422415fd24319c0fb0a1c5ac968b17e8575046e161035942eab010",
+      "file": "block-148.json",
+      "bytes": 17460,
+      "sha256": "310f971201d4538c6e621b5502442acdf7ee59645601af18fa0241d2f7378caf",
+      "reason": "a non-Tachyon transaction at index 1 precedes the Tachyon ones: tx_index counts all transactions"
+    },
+    {
+      "height": 4103,
+      "hash": "f5c7d61681a196e6e35ead1faaf98f2d8b36bc8b14822bd7cf9b623c3bd3bff6",
+      "file": "block-4103.json",
+      "bytes": 5759,
+      "sha256": "d091c14bb078d306e8a607304c289dc803fab0a3b11e8bee0ebe3bc5b5bc6612",
+      "reason": "last block of epoch 0"
+    },
+    {
+      "height": 4104,
+      "hash": "f8d9685100c80d6aae6945abf46c35e3cd1c741075e1db8bb7aefb6815d65b96",
+      "file": "block-4104.json",
+      "bytes": 5759,
+      "sha256": "ce2055b945d860ee51fe1a86b96cbfe0f07ca98481a3534d7461dc972dd5a809",
+      "reason": "first block of epoch 1"
+    },
+    {
+      "height": 40180,
+      "hash": "2fcd51969f6eabd5f289e78701b250b567bbc0651676cbfeeb6e75698a07c59e",
+      "file": "block-40180.json",
+      "bytes": 18069,
+      "sha256": "1a71ee19956d8f76c613519300c6ee434386ddbef742d77c2860b8d42b610718",
+      "reason": "proof stamp with an odd tachygram count (17) and two pointer stamps"
+    },
+    {
+      "height": 40182,
+      "hash": "91d884a0e5c8335973480c445e39e74e7d14f8934cb02317d46b2ada400fae3b",
+      "file": "block-40182.json",
+      "bytes": 70837,
+      "sha256": "232d7cbfd59815b1d6673e3225f1af4138047deaaf6f793a43be882f237edc97",
+      "reason": "most transactions per block seen (17): one proof stamp, 15 pointer stamps"
+    },
+    {
+      "height": 40192,
+      "hash": "b46c0029e2f613897c9c7124c7ea660cc9f6eb085c535b8568fb09937388e88a",
+      "file": "block-40192.json",
+      "bytes": 5768,
+      "sha256": "7b003332a5d73d7452ac3028b1ac80ed48def13404e5fd938e22c9a93a158385",
+      "reason": "post-activation block with no Tachyon transactions"
+    },
+    {
+      "height": 40086,
+      "hash": "86648a9d1bdea06b87a8cec38257b4ba30f1720d3877bf529f74d9eaf388f6a7",
+      "file": "block-40086.json",
+      "bytes": 72547,
+      "sha256": "71c437791bf59d62ebc0c1e8245b5c709066fc0973b6415dbaa63240d8c7ed19",
+      "reason": "largest proof stamp seen (112 tachygrams, even)"
+    }
+  ]
+}
