@@ -199,9 +199,15 @@ Taken as git dependencies pinned to `40b0ba6a`:
 | `pir-node-rpc` | Bounded JSON-RPC transport |
 | `pir-publisher` (library) | `run_registered` and `PublisherDefinition` |
 
-Taken from crates.io at the versions `wallet-pir` pins: `zakura-pir-protocol`,
-`zakura-pir-publisher`, `zakura-pir-query-server` (`=0.0.1-rc5`) for the native
-8-bit PIR profile. The root manifest MUST carry the same `[patch.crates-io]`
+Taken from crates.io at the versions `wallet-pir` pins, for the native 8-bit
+PIR profile (section 6.6): `zakura-pir-protocol` (feature `native`; masks,
+sizes), `zakura-pir-server-core` (hint, preprocessing, public setup),
+`zakura-pir-query-server` (upload parsing, reply packing), `zakura-pir-client`
+(feature `native`; query construction and decoding), all `=0.0.1-rc5`, and
+`reinspiring` `=0.1.3-rc.1` (scan kernel). None of `wallet-pir`'s product
+wrappers (`transparent-shared`, `receiver-pir-server`, `pir-query-server`) is
+used: they are product-specific, and txid's `TableProfile` selects the 16-bit
+profile for any table name it does not know. The root manifest MUST carry the same `[patch.crates-io]`
 block as `wallet-pir` for `ipir-sp`, `inspiring`, `reinspiring` and
 `simplepir-kernel` (git `valargroup/ipir-sp`, rev `5ea080a3`).
 
@@ -209,6 +215,14 @@ Written new, because the originals cannot be extended:
 
 - The query host (`pir-query-server` is not a plugin host).
 - The chain decoder (`zakura-server-chain` exposes only per-product modules).
+- The table runtime: about 120 lines over the free P8 primitives, as
+  Receiver's `Prepared` is.
+- Each product's distribution routes (`current`, `objects/<sha256>`,
+  `authority/check`). `pir_publication` defines the types but serves no
+  routes; Receiver writes its own, and so does each product here.
+- A TLS edge for tests. `pir-publisher` serves plain HTTP only and
+  `pir_sync_manager::HttpsSource` accepts only `https://` origins, so a TLS
+  terminator sits between them, as in `wallet-pir`'s tests and deployments.
 
 ### 4.4 Conventions copied
 
@@ -296,6 +310,13 @@ remains the fallback if large-value fill becomes a cost problem (decision D4).
 These are the two geometries `wallet-pir` already runs for transaction details
 on the native 8-bit profile. No other geometry is valid in version 1.
 
+Version 1 publishes every table at `tachyon-4k8`. `tachyon-2k8` is defined
+(its name, sizes and seeds are fixed here) but not published: it saves 7,168
+bytes of upload and about 10% of a table's memory, at the cost of half the
+anonymity set per table and a second code path. txid likewise runs one
+geometry per deployment and keeps the other for rollback only. Clients MUST
+reject a map that names any geometry other than `tachyon-4k8`.
+
 ### 6.2 Row layout
 
 A row holds `SLOTS = floor(8192 / ENTRY_BYTES)` fixed-size entries.
@@ -311,6 +332,11 @@ A row holds `SLOTS = floor(8192 / ENTRY_BYTES)` fixed-size entries.
 - A row that violates any of this is non-canonical. Publisher, query host and
   client each MUST validate rows they produce or decode, as Status
   `decode_row` does.
+- The ordinal is not stored in memo, first-contact or registry entries, so a
+  reader cannot check the ordinal part of the order. Readers check that keys
+  are non-decreasing (strictly increasing for tachygram, whose keys are
+  unique); placing equal keys in ordinal order is the publisher's obligation,
+  and tests check it against the oracle.
 
 | Product | Entry | `ENTRY_BYTES` | `SLOTS` | Target load per row | Entries per `4k8` table |
 |---|---|---:|---:|---:|---:|
@@ -386,7 +412,9 @@ row_k  = u32_le(h(seed_k)[0..4]) mod rows        for segment k of that bucket
   that concatenates its per-segment results in segment order therefore returns
   them in ordinal order.
 - At most `MAX_SEGMENTS = 8` segments per bucket; beyond that the publication
-  fails, the previous publication keeps serving and an alert is raised.
+  fails, the previous publication keeps serving and an alert is raised. (The
+  value matches Receiver's shard-segment limit but is this spec's own
+  constant; txid has no overflow-segment cap.)
 - A client MUST query every segment of the bucket it selects. Segment counts
   are public in the map.
 - Entries are never evicted. Status's eviction rule does not apply, because
@@ -417,13 +445,44 @@ transaction details use it:
 CPU only.
 
 - No per-client keys are stored. Key material rides in each query.
-- Public setup material is deterministic per table and published as an object.
+- The query masks and the packing setup are derived from two public 32-byte
+  seeds per (product, geometry), never from data, as Receiver and txid derive
+  theirs:
+
+  ```
+  seed(purpose) = SHA-256("tachyon-pir/v1/native-p8/" || product || "\0"
+                          || geometry || "\0" || purpose)
+  masks = P8.public_query_masks(seed("query-masks"), rows, 8192)
+  setup = NativeSetup::new(P8.params(), seed("packing-setup"))
+  ```
+
+  `product` is `memo`, `first-contact`, `tachygram` or `registry`; `geometry`
+  is the geometry name; `purpose` is `query-masks` or `packing-setup`. A client
+  derives both once per product and geometry.
+- Public setup material is a deterministic function of the seeds and the row
+  bytes, and is published as an object. The publisher therefore prepares every
+  table it publishes in full (about 1 s per `4k8` table on a 32-thread host,
+  about 5 s on one thread), because `public_sha256` enters the session id.
+  Coalescing (section 11.3) bounds that cost.
 - Query hosts prepare runtimes from published rows before switching to a new
-  publication, as Receiver hosts do.
-- Reference sizes from `wallet-pir` for `4k8`: upload 28,168 bytes, reply
-  10,256 bytes, public setup about 60 KB, resident runtime about 160 MiB per
-  table. These MUST be re-measured for this workspace before they are quoted
-  as its own.
+  publication, as Receiver hosts do, and check that each prepared public setup
+  equals the published object.
+- Sizes, measured for this workspace on 2026-11-14
+  (`docs/shared/wallet-pir-integration.md` section 1):
+
+  | Quantity | `tachyon-4k8` | `tachyon-2k8` |
+  |---|---:|---:|
+  | Query payload, `P8.request_len_bits(rows, 28)` | 28,160 | 20,992 |
+  | Request body, 52-byte header + payload | 28,212 | 21,044 |
+  | Reply body, `P8.response_len(8192)` | 10,240 | 10,240 |
+  | Response, 52-byte header + reply | 10,292 | 10,292 |
+  | Public setup, `P8.public_len(8192)` | 45,056 | 45,056 |
+  | Runtime memory, planning bound | 160.17 MiB | 144.17 MiB |
+
+  `wallet-pir`'s published txid figures (28,168, 10,256, about 60 KB) include
+  txid's own framing and base64. Building a runtime adds a transient peak of a
+  few hundred MiB. The compiled matrices, not the rows, dominate memory, so
+  `2k8` costs about 90% of `4k8`.
 
 ## 7. Product: memo and first-contact
 
@@ -579,8 +638,12 @@ anonymity set of at most 3,072 addresses (decision D3).
 
 ### 9.3 Write API
 
-Served by the publisher process on its own public listener, mounted at
-`/registry/v1` with legacy alias `/v1/registry`.
+Served by the publisher process on the registry product's listener, mounted
+at `/registry/v1` with legacy alias `/v1/registry`. That listener is private
+(section 11.7), so a reverse proxy exposes the write API publicly. The proxy
+MUST overwrite `X-Forwarded-For` with the connecting client's address; the
+per-client controls below key on that header (through `pir_control`'s client
+key) and fall back to the peer address when it is absent.
 
 `GET /registry/v1/challenge`
 
@@ -723,6 +786,25 @@ Table:
 A sealed scope's `last_height` is the last block of its epoch, span or chunk.
 For an open scope it is the anchor height.
 
+Scope listing:
+
+- Every scope has a **scope index**: the epoch for memo and tachygram (equal to
+  `scope_id`), the span's position in the sequence of spans for first-contact
+  (0, 1, 2, …), and `chunk_id` for registry.
+- Every scope from index 0 up to the newest is listed exactly once: sealed
+  scopes in map chunks, open scopes in `open_scopes`, in ascending index.
+- Map chunk `k` describes the sealed scopes with index in
+  `32k .. 32k + 32`. It is the JSON object
+  `{"protocol": "<protocol>", "base": 32k, "scopes": [Scope, …]}`, refusing
+  unknown fields, served at `map/{base}/{sha256}` and stored as an object. A
+  chunk that does not yet hold 32 sealed scopes is reissued under a new digest
+  as further scopes seal; `sealed_chunks` lists every chunk by ascending
+  `base`.
+- A scope with no entries has `n_buckets = 1` and no tables (`"tables": []`).
+  Every lookup in it is absent; a client that wants an identical transcript
+  sends a query to another table of the same product instead. This keeps empty
+  epochs from costing query-host memory.
+
 ### 10.4 Sessions and queries
 
 ```
@@ -750,7 +832,8 @@ magic(4) || session_id(32) || nonce(16) || payload
 - The 52-byte header is echoed at the start of the response, followed by the
   packed answer. This is the Receiver `RPQ1` framing.
 - The payload length MUST equal the single length the profile defines for the
-  table's geometry. Any other length is `400`.
+  table's geometry (`P8.request_len_bits(rows, 28)`, section 6.6). Any other
+  length is `400`.
 - Body limit 512 KiB; upload deadline 15 s.
 - The server MUST NOT log or label metrics with any client-supplied byte.
 
@@ -767,6 +850,14 @@ JSON body `{"code": "...", "message": "..."}`, as Enhance returns.
 | 413 | `invalid_request` | Body over the limit | Do not retry |
 | 429 | `overloaded` | Admission refused; `Retry-After: 1` | Retry later |
 | 503 | `temporarily_unavailable` | Not ready or no serving authority | Retry later |
+
+A query host tells `409` from `410` as follows. A session in the current
+publication, or in a displaced publication still within its 600 s retention,
+is served. A session that was present in a publication the host displaced
+because the publisher's `recovery_epoch` increased, and is absent from the
+current publication, is **revoked**: the host remembers it for the retention
+window and answers `410`. Any other unknown session is `409` with the current
+`map_sha256`.
 
 ### 10.6 Admission
 
@@ -804,14 +895,25 @@ Stamp        = Proof { anchor, tachygram_set, tachygrams: Vec<[u8; 32]> }
 
 ### 11.2 Ingestion
 
-Each chain product implements `pir_pipeline::ingestion::Ingestion`.
+Each chain product implements `pir_pipeline::ingestion::Ingestion`, whose
+methods are `target_height`, `start_height`, `observed`, `committed`,
+`checkpoint_at_or_below`, `withdraw_above`, `rewind`, `ingest(from, through)`,
+`caught_up` and `failed`.
 
 - `target_height(tip) = tip - CONFIRMATION_DEPTH`, with
   `CONFIRMATION_DEPTH = 2` (Receiver's default).
 - On every pass the follower walks durable checkpoints newest-first against
   the node's canonical hashes. `withdraw_above` is always called before
   `rewind`.
+- `ingest` fetches and decodes its blocks itself through `tachyon-chain`; the
+  feed carries only tips and canonical hashes.
 - A batch is accepted only if its newest block is still canonical afterwards.
+- Publication runs from `caught_up`, through
+  `PublisherExecutor::publish` and the phases `check`, `build`, `store`,
+  `verify`, `assemble`, `recheck`, `commit`, as Receiver's `Export` does.
+- `pir_pipeline::ingestion::BlockId` and `ChainObservation` carry hashes as
+  display-order strings; they are converted to protocol order (section 3) at
+  this boundary.
 
 ### 11.3 Publication
 
@@ -824,7 +926,12 @@ Each product implements `pir_pipeline::Publication` and `Publisher` and uses
   the map head. Advancement is atomic and never waits for consumers.
 - Distribution prefixes: `/provider/memo/v1/`, `/provider/first-contact/v1/`,
   `/provider/tachygram/v1/`, `/provider/registry/v1/`, each with `current`,
-  `objects/<sha256>` and `authority/check`.
+  `objects/<sha256>` and `authority/check`. Each product serves these routes
+  itself over the `pir_publication` types, as Receiver's distribution does.
+- The descriptor carries the map head's object reference, `generation` and
+  `recovery_epoch`. `generation` is this product's own durable counter,
+  incremented by every publication; `recovery_epoch` is the authority
+  fence's.
 - Distribution schema strings: `tachyon-<product>-prepared-distribution-v1`.
 - The five normative rules of `wallet-pir/docs/spec/spec-publisher-ingest-model.md`
   apply as written.
@@ -837,8 +944,12 @@ something, coalesced to one active and one pending, as Enhance does.
 - A rewind that stays inside open scopes produces a new generation. Sessions of
   the rebuilt open tables change because their content changes.
 - A rewind that reaches a sealed scope increments `recovery_epoch`, revokes the
-  sessions of every affected table (`410`) and rebuilds them. Withdrawal is
-  durable before the journal rewinds.
+  sessions of every affected table (`410`) and rebuilds them. `withdraw_above`
+  does this by applying `AuthorityTransition::Recover` to the
+  `PublicationAuthority` (which also withdraws), as Status does after a
+  withdrawal. A rewind that stays inside open scopes applies
+  `AuthorityTransition::Withdraw` if the current publication's anchor is above
+  the kept block. Either transition is durable before the journal rewinds.
 - A publisher restart always starts a new recovery epoch, as
   `PublicationAuthority` requires.
 
@@ -867,7 +978,12 @@ work, as it is for Receiver.
 per product over `pir_sync_manager::HttpsSource`.
 
 - It checks `/.well-known/pir-service-discovery` before start and before each
-  sync pass, and exits on a confirmed major-version mismatch.
+  sync pass, and exits on a confirmed major-version mismatch. The publisher
+  serves that document only on its management listener, so the TLS edge in
+  front of the publisher routes this path there and every other path to the
+  product listener.
+- It trusts the publisher's certificate through `publisher_ca` (a PEM file) in
+  its configuration, as `HttpsSource` requires.
 - It fetches objects, verifies digests, prepares runtimes and only then
   switches to the new publication. A partial publication is never served.
 - It keeps the displaced publication for 600 s so in-flight queries finish.
@@ -882,17 +998,29 @@ Publisher:
 ```json
 {
   "management_listen": "127.0.0.1:9400",
-  "chain": { "rpc_url": "http://tachyscan.cnode.phd:18232", "no_auth": true, "poll_ms": 1000 },
-  "memo":          { "enabled": true, "settings": { "state_dir": "/var/lib/tachyon-pir/memo" } },
+  "chain": { "rpc_url": "http://tachyscan.cnode.phd:18232", "no_auth": true, "poll_ms": 1000,
+             "epoch_length": 4096 },
+  "memo":          { "enabled": true, "settings": { "listen": "127.0.0.1:9401",
+                     "state_dir": "/var/lib/tachyon-pir/memo" } },
   "first_contact": { "enabled": true, "settings": {} },
-  "tachygram":     { "enabled": true, "settings": { "state_dir": "/var/lib/tachyon-pir/tachygram" } },
-  "registry":      { "enabled": true, "settings": { "state_dir": "/var/lib/tachyon-pir/registry",
-                     "public_listen": "127.0.0.1:9410", "difficulty_bits": 20 } }
+  "tachygram":     { "enabled": true, "settings": { "listen": "127.0.0.1:9402",
+                     "state_dir": "/var/lib/tachyon-pir/tachygram" } },
+  "registry":      { "enabled": true, "settings": { "listen": "127.0.0.1:9403",
+                     "state_dir": "/var/lib/tachyon-pir/registry", "difficulty_bits": 20 } }
 }
 ```
 
-`first_contact` shares the memo state directory and requires `memo` to be
-enabled.
+- `pir_publisher::run_registered` hosts the products. It requires every
+  product listener to be a private address with a fixed port, one listener per
+  product definition, and disjoint state directories between definitions.
+- `first_contact` shares the memo state directory (`memo-v1.sqlite`) and
+  requires `memo` to be enabled. Memo and first-contact therefore run as **one**
+  publisher definition on the memo listener, serving both distribution
+  prefixes.
+- `epoch_length` is read per network (section 15). Tests use a small value so
+  that synthetic chains cross epoch boundaries in a few hundred blocks.
+- The registry listener serves both the registry distribution prefix and the
+  write API (section 9.3).
 
 Query server:
 
@@ -902,17 +1030,23 @@ Query server:
   "public_listen": "127.0.0.1:9510",
   "memo": { "enabled": true, "settings": {
     "publisher": "https://publisher.example", "state_dir": "/var/lib/tachyon-pir-query/memo",
+    "publisher_ca": "/etc/tachyon-pir-query/publisher-ca.pem",
     "role": "combined", "publisher_network": "test", "publisher_genesis": "<64 hex>",
     "retain_scopes": 64 } }
 }
 ```
 
+`publisher_ca` is optional; without it the system roots are used.
+
 Both binaries accept `--config FILE` and `--check` (validate offline).
 
 ### 11.8 Observability
 
-- Management listener: `GET /health`, `GET /ready`, `GET /metrics`, with the
-  response shapes of `wallet-pir`.
+- Query server management listener: `GET /health`, `GET /ready`,
+  `GET /metrics`, with the response shapes of `wallet-pir`.
+- Publisher: `run_registered`'s management listener serves `/health`,
+  `/ready` and the discovery document, and no metrics. Each product therefore
+  serves `GET /metrics` on its own listener.
 - HTTP metrics from `pir-observability`, with fixed endpoint labels.
 - Product metrics, all prefixed `tachyon_<product>_`:
   `ingested_height`, `anchor_height`, `entries_total`, `open_scope_entries`,
@@ -994,6 +1128,14 @@ Rules carried over from `wallet-pir`:
   boundaries.
 - Fast fixtures use small synthetic chains from the node double. Deployed-size
   parameters are exercised only in qualification.
+- End-to-end harness: the node double, a TLS edge written in
+  `tools/e2e-tests`, the publisher binary and the query-server binary each run
+  as separate processes or listeners joined only by real HTTP(S). Tables keep
+  the real `tachyon-4k8` geometry (no smaller valid table exists), so a test
+  keeps its table count small: each table costs about 1 s to prepare on each
+  side. Chains use a small `epoch_length`. `wallet-pir` runs no
+  process-spawning test inside a 30 s budget; this workspace does, and its
+  tests MUST stay inside it.
 
 ### 13.2 Acceptance scenarios
 
@@ -1057,7 +1199,7 @@ until wallets publish envelopes.
 | `MAX_STATE_BYTES` | 1,024 | Provisional (D1) |
 | `MAX_BUCKETS` | 64 | From `wallet-pir` txid |
 | `MAX_SEEDS` | 64 | From `wallet-pir` txid |
-| `MAX_SEGMENTS` | 8 | From `wallet-pir` Receiver |
+| `MAX_SEGMENTS` | 8 | This spec's own (matches Receiver's shard-segment limit) |
 | `CONFIRMATION_DEPTH` | 2 | From `wallet-pir` Receiver |
 | `SEAL_DEPTH` | 100 | Provisional |
 | `FC_SPAN_TARGET` | 3,072 | Provisional |
@@ -1065,6 +1207,7 @@ until wallets publish envelopes.
 | `REGISTRY_CHUNK_ENTRIES` | 3,072 | Provisional (D3) |
 | `REGISTRY_CHALLENGE_SECONDS` | 600 | Provisional |
 | `MAP_CHUNK_SCOPES` | 32 | From `wallet-pir` txid |
+| `GEOMETRY` (published) | `tachyon-4k8` | Version 1 (section 6.1) |
 
 ## 16. Open decisions
 
@@ -1093,6 +1236,9 @@ Each has a provisional answer in this document so that work can start.
 - **Profile sizes are borrowed.** Query, reply and memory figures are
   `wallet-pir` measurements for a different entry layout. They are planning
   numbers until re-measured here.
-- **Memory growth.** At about 160 MiB per table and two chain tables per epoch,
-  64 retained epochs is about 20 GiB per host on testnet volumes. Higher
-  throughput multiplies buckets and with them memory.
+- **Memory growth.** At about 160 MiB per table (planning bound) and two chain
+  tables per epoch, 64 retained epochs is about 20 GiB per host on testnet
+  volumes. Higher throughput multiplies buckets and with them memory.
+- **Publisher preparation cost.** The publisher prepares every table it
+  publishes (section 6.6), about 1 s per table on a large host. An open epoch
+  with many buckets and segments is rebuilt at every publication.
