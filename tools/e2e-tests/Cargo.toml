@@ -1,0 +1,49 @@
+[package]
+name = "tachyon-pir-e2e-tests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "End-to-end harness: TLS edge, spawned processes, node double, HTTP helpers"
+license = "MIT OR Apache-2.0"
+# Binaries are only the re-declared foreign entrypoints below.
+autobins = false
+
+[lib]
+path = "src/lib.rs"
+
+# `CARGO_BIN_EXE_<name>` is set only for binaries of the test's own package, so
+# foreign entrypoints are re-declared here, as wallet-pir's pir-e2e-tests does.
+# The `-test` suffix keeps the output file apart from the owning package's
+# binary when both are built in one workspace invocation. The host binaries
+# (`tachyon-pir-publisher-test`, `tachyon-pir-query-server-test`) join this
+# list when they exist.
+[[bin]]
+name = "tachyon-node-double-test"
+path = "../fixtures/src/bin/tachyon-node-double.rs"
+test = false
+doc = false
+
+[dependencies]
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+libc = "0.2"
+pir-service-discovery = { workspace = true }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tachyon-fixtures = { path = "../fixtures" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+axum = "0.7"
+futures-util = "0.3"
+# The query host's transport; the harness proves it accepts the edge's origin.
+pir-sync-manager = { workspace = true }
