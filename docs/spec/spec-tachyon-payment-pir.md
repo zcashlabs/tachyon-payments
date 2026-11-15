@@ -540,17 +540,26 @@ has handed out, per span, and first contacts are rare.
 truth for both tables, following `receiver-store`.
 
 ```
-Store::open(path) -> Store
+Store::open(path, binding) -> Result<Store>
 Store::append(block: &IndexedBlock) -> Result<()>
-Store::rewind(to: BlockId) -> Result<()>
-Store::checkpoint_at_or_below(height) -> Option<BlockId>
-Store::entries(kind, scope) -> impl Iterator<Item = Entry>
-Store::spans() -> Vec<Span>
+Store::rewind(keep: Option<&BlockId>) -> Result<()>
+Store::checkpoint_at_or_below(height) -> Result<Option<BlockId>>
+Store::entries(kind, scope) -> Result<impl Iterator<Item = Entry>>
+Store::spans() -> Result<Vec<Span>>
 ```
 
 `IndexedBlock` holds the block id, epoch and the parsed entries with their
-ordinals. `append` is atomic per block. `rewind` removes every block above the
-target and any span boundary decided by them.
+ordinals. `append` is atomic per block. `rewind` removes every block above
+`keep`, or every block when `keep` is `None`, matching the `Ingestion` trait's
+`rewind`, and any span boundary decided by them. Reads return `Result`: an
+SQL error read as "no checkpoint" would rewind everything. The `binding`
+records the network identity and epoch length; reopening a journal under a
+different binding is refused.
+
+Every journal starts at the activation height. Ordinals, and the stamp
+ordinals of section 8.1, are canonical only for a scope stored from its first
+block; a publisher MUST NOT publish a scope whose first stored height is not
+the scope's first height.
 
 ## 8. Product: tachygram
 
@@ -615,17 +624,19 @@ A wallet uses this table for two things: to locate its note commitment
 
 `tachygram-store` keeps `tachygram-v1.sqlite` with the same `open`, `append`,
 `rewind` and `checkpoint_at_or_below` operations as `memo-store`, plus
-`stamps(epoch)`.
+`stamps(epoch)`. A tachygram repeated in a later epoch is not a journal fault:
+each epoch's table is its own scope, and consensus, not this journal, rules on
+reuse across the epoch boundary.
 
 ### 8.6 OSS interface (not built)
 
 `tachygram-store` exposes
 
 ```
-Store::epoch_tachygrams(epoch) -> impl Iterator<Item = (StampOrdinal, [u8; 32])>
+Store::epoch_tachygrams(epoch) -> Result<impl Iterator<Item = (StampOrdinal, [u8; 32])>>
 ```
 
-in stamp order. This is the input an OSS routes into buckets. The function is
+in stamp order, and within a stamp in the order the stamp lists them. This is the input an OSS routes into buckets. The function is
 public API so that a later OSS crate can depend on it without changing the
 journal.
 
