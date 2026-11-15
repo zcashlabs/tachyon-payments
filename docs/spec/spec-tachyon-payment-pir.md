@@ -181,7 +181,8 @@ A new Cargo workspace at `tachyon-payments/`. Package layout follows
 |---|---|---|
 | `tachyon-chain` | `src/shared/tachyon-chain` | Decodes verbose blocks into `TachyonBlock`; epoch arithmetic; network identity |
 | `tachyon-pir-protocol` | `src/shared/tachyon-pir-protocol` | Wallet-facing contract: constants, row layouts, placement hashing, map and header types. No server dependencies |
-| `tachyon-pir-table` | `src/shared/tachyon-pir-table` | The shared bucket-row table: build, validate, segment, digest |
+| `tachyon-pir-table` | `src/shared/tachyon-pir-table` | The shared bucket-row table: build, validate, segment, digest; the P8 table runtime |
+| `tachyon-pir-distribution` | `src/shared/tachyon-pir-distribution` | Publisher-to-query-host contract shared by all products: descriptor, inventory, the publisher's object store and authority with its `current`, `objects` and `authority/check` routes, and the consumer-side inventory reader. No chain dependencies |
 | `memo-store`, `memo-publisher` | `src/memo/` | Journal and publication for memo and first-contact |
 | `tachygram-store`, `tachygram-publisher` | `src/tachygram/` | Journal and publication for tachygrams |
 | `registry-store`, `registry-publisher` | `src/registry/` | Registration log, write API, publication |
@@ -201,6 +202,9 @@ Dependency rules, enforced by a boundary check in CI as in
 - Serving code never depends on chain or ingestion code.
 - Product crates never depend on each other. `first-contact` shares the
   `memo-*` crates by design and counts as the same product family.
+- Shared libraries never depend on product crates. Machinery more than one
+  product needs (the table, the distribution contract) therefore lives in
+  `src/shared/` rather than being repeated per product.
 
 ### 4.3 What is reused from `wallet-pir`
 
@@ -691,8 +695,10 @@ challenge(32) || nonce(8) || addr(1216)
 - Registration is idempotent. A repeated address returns its existing
   `chunk_id` with `"created": false`.
 - The response is sent only after the log entry is durable (fsync).
-  `visible_after_sequence` is the first publication sequence that will contain
-  the entry.
+  `visible_after_sequence` is the entry's log sequence `s` (section 9.4,
+  counting from 0). The entry is contained in every registry publication
+  whose map has `log_sequence > s`; the publisher publishes such a map at its
+  next publication.
 - Entries are never deleted or changed.
 
 Abuse controls:
@@ -769,7 +775,12 @@ Head:
 - `protocol` is `tachyon-memo-pir-v1`, `tachyon-first-contact-pir-v1`,
   `tachyon-tachygram-pir-v1` or `tachyon-registry-pir-v1`.
 - The registry map omits `activation_height`, `epoch_length`, `anchor_height`
-  and `anchor_hash`, and carries `log_sequence` instead.
+  and `anchor_hash`, and carries `log_sequence` instead: the number of log
+  entries the publication contains, which is also the sequence the next
+  registration will receive. Registry Scope objects omit `first_height` and
+  `last_height`; chunk `c` holds the entries with sequences
+  `c × REGISTRY_CHUNK_ENTRIES` up to that plus `entries`. An empty log is
+  published with one open chunk 0 holding no entries.
 - `floor_scope` is the oldest scope this provider serves (section 11.5).
 
 Scope:
