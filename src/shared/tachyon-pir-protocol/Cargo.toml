@@ -1,0 +1,16 @@
+[package]
+name = "tachyon-pir-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "Wallet-facing contract of the Tachyon payment PIR services: constants, row layouts, placement, map, session and query framing"
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+# The native 8-bit PIR profile: masks, packing setup and exact sizes (spec 6.6).
+zakura-pir-protocol = { workspace = true, features = ["native"] }

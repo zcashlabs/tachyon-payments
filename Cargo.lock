@@ -1610,6 +1610,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachyon-pir-cli"
+version = "0.1.0"
+
+[[package]]
 name = "tachyon-pir-distribution"
 version = "0.1.0"
 dependencies = [
@@ -1669,6 +1673,10 @@ dependencies = [
  "thiserror 2.0.21",
  "zakura-pir-protocol",
 ]
+
+[[package]]
+name = "tachyon-pir-table"
+version = "0.1.0"
 
 [[package]]
 name = "tempfile"
