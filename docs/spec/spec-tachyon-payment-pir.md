@@ -794,7 +794,16 @@ Head:
   registration will receive. Registry Scope objects omit `first_height` and
   `last_height`; chunk `c` holds the entries with sequences
   `c × REGISTRY_CHUNK_ENTRIES` up to that plus `entries`. An empty log is
-  published with one open chunk 0 holding no entries.
+  published with one open chunk 0 holding no entries. Field order of the
+  registry head and scope:
+
+  ```json
+  { "protocol": "tachyon-registry-pir-v1", "profile": "…", "network": "test",
+    "genesis_hash": "<64 hex>", "generation": 41, "recovery_epoch": "2",
+    "log_sequence": 4821, "floor_scope": 0, "sealed_chunks": [ … ],
+    "open_scopes": [ { "scope_id": 1, "state": "open", "entries": 1749,
+                       "n_buckets": 1, "tables": [ … ] } ] }
+  ```
 - `floor_scope` is the scope index (below) of the oldest scope this provider
   serves (section 11.5).
 - The head is at most `MAX_MAP_HEAD_BYTES = 1 MiB`. Open scopes list their
