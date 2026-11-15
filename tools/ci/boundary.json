@@ -4,6 +4,7 @@
     "tachyon-chain": "src/shared/tachyon-chain",
     "tachyon-pir-protocol": "src/shared/tachyon-pir-protocol",
     "tachyon-pir-table": "src/shared/tachyon-pir-table",
+    "tachyon-pir-distribution": "src/shared/tachyon-pir-distribution",
     "memo-store": "src/memo/memo-store",
     "memo-publisher": "src/memo/memo-publisher",
     "tachygram-store": "src/tachygram/tachygram-store",
@@ -23,6 +24,7 @@
   "serving": [
     "tachyon-pir-protocol",
     "tachyon-pir-table",
+    "tachyon-pir-distribution",
     "tachyon-pir-query-server"
   ],
   "chain_or_ingestion": [
@@ -39,8 +41,17 @@
     "tachyon-fixtures"
   ],
   "families": {
-    "memo": ["memo-store", "memo-publisher"],
-    "tachygram": ["tachygram-store", "tachygram-publisher"],
-    "registry": ["registry-store", "registry-publisher"]
+    "memo": [
+      "memo-store",
+      "memo-publisher"
+    ],
+    "tachygram": [
+      "tachygram-store",
+      "tachygram-publisher"
+    ],
+    "registry": [
+      "registry-store",
+      "registry-publisher"
+    ]
   }
 }
