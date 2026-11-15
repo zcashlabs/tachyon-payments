@@ -1,0 +1,21 @@
+[package]
+name = "tachygram-store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The tachygram product's SQLite journal, tachygram-v1.sqlite (spec sections 8.5 and 8.6)"
+
+[dependencies]
+# Same version and features as wallet-pir's receiver-store.
+rusqlite = { version = "0.37", features = ["bundled"] }
+tachyon-chain = { path = "../../shared/tachyon-chain" }
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"
+# The golden expectations carry a SHA-256 over each stamp's tachygrams.
+sha2 = "0.10"
+tachyon-fixtures = { path = "../../../tools/fixtures" }
+tempfile = "3"

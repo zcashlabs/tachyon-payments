@@ -3,8 +3,13 @@ resolver = "2"
 members = [
     # Shared libraries.
     "src/shared/tachyon-chain",
+    "src/shared/tachyon-pir-protocol",
+    "src/shared/tachyon-pir-distribution",
+    # Products.
+    "src/tachygram/tachygram-store",
     # Tools.
     "tools/fixtures",
+    "tools/e2e-tests",
 ]
 
 # Shared crates reused from wallet-pir, pinned to one revision (spec section 4.3).
