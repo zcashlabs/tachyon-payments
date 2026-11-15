@@ -94,11 +94,29 @@ Stamp shapes, as returned by `getblock <hash> 2` under `tx[].tachyon`:
   proves, including actions of other transactions in the block.
 - A **pointer** stamp has `aggregateId` and `feeZat`, and no tachygrams. The
   transaction's own `actions` and `memo` are still present.
-- In the sample, 42 of 290 Tachyon transactions carried proof stamps. Tachygram
-  counts per proof stamp ranged from 5 to 108 and were often odd. The draft
-  ZIPs require exactly two tachygrams per covered action, so the testnet build
-  does not yet follow them. Ingestion MUST read counts from the data and MUST
-  NOT assume that rule.
+- In the sample, 42 of 290 Tachyon transactions carried proof stamps. A wider
+  read-only scan for the golden fixtures (17,739 blocks) found proof stamps
+  with 3 to 112 tachygrams, often odd: always twice the covered actions plus 1
+  to 16. The draft ZIPs require exactly two tachygrams per covered action, so
+  the testnet build does not yet follow them. Ingestion MUST read counts from
+  the data and MUST NOT assume that rule. `strict_zip_rules` does not check it
+  either, because covered actions cannot be counted from the JSON without
+  linking pointer stamps to their aggregate.
+- `aggregateId` is 64 bytes. On the alpha testnet it is the covering proof
+  transaction's txid followed by its `authdigest`, each in protocol order, and
+  that proof is always in the same block. Ingestion MUST NOT rely on this.
+- Every Tachyon bundle carries a stamp. A bundle without one, or a stamp that
+  carries the other kind's fields, is a decode error.
+- `tx[].tachyon.memo` is the hex of `vMemoTachyon`, `""` when empty.
+  Transactions without a Tachyon bundle (for example the coinbase) have no
+  `tachyon` key.
+- `getblockchaininfo.upgrades` is an object keyed by branch id (NuTachyon is
+  `fffffffc` on the testnet), each entry carrying `name`, `activationheight`
+  and `status`. Lookup is by `name`.
+- JSON-RPC errors arrive with HTTP 200 and `{result: null, error: {code,
+  message}}`: `-8` for a height above the tip, `-5` for an unknown block hash.
+  A block reorged away may be answered either with `-5` or with
+  `confirmations: -1`; the follower MUST treat both as not canonical.
 
 Limits from the draft ZIPs, which the decoder enforces as integrity checks once
 the node follows them (configuration flag `strict_zip_rules`, off for the alpha
@@ -878,15 +896,23 @@ NodeClient::block_hash(height) -> Hash
 NodeClient::block(hash) -> TachyonBlock
 
 TachyonBlock { id: BlockId, prev: Hash, txs: Vec<TachyonTx> }
-TachyonTx    { txid, memo: Vec<u8>, own_actions: u32, stamp: Stamp }
+TachyonTx    { tx_index: u32, txid, memo: Vec<u8>, own_actions: u32, stamp: Stamp }
 Stamp        = Proof { anchor, tachygram_set, tachygrams: Vec<[u8; 32]> }
-             | Pointer { aggregate_id }
+             | Pointer { aggregate_id: [u8; 64] }
 ```
+
+- `txs` holds only transactions that carry a Tachyon bundle. `tx_index` is the
+  transaction's zero-based position among **all** transactions of the block,
+  coinbase included, so indices may have gaps. It is the "tx index in block" of
+  section 5.2.
 
 - Blocks are always fetched by hash after resolving the height once, so a
   reorg cannot change the block under a read.
-- The decoder MUST reject a block whose hash, height or transaction ids do not
-  match what was requested, as `tachyscan` does.
+- The decoder MUST reject a block whose `hash` differs from the requested
+  hash, whose `height` differs from the height the hash was resolved from, any
+  of whose transactions reports a `blockhash` or `height` other than the
+  block's, whose `nTx` differs from the number of listed transactions, or
+  whose txids are malformed or repeated.
 - `activation_height` is read from `getblockchaininfo.upgrades` by the name
   `NuTachyon`. If the upgrade is absent the publisher refuses to start.
 - The decoder reads the JSON form. A raw-transaction decoder using the
