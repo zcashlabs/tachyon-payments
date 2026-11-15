@@ -527,8 +527,9 @@ CPU only.
   - it contains at least `FC_SPAN_TARGET = 3,072` entries (75% of one `4k8`
     table at target load), or
   - it covers `FC_SPAN_MAX_EPOCHS = 64` epochs.
-- A span that closes by count has `n_buckets = 1`. A single epoch that alone
-  exceeds one table's target uses more buckets under the rule in section 6.3.
+- `n_buckets` follows section 6.3 for every span. A span that closes by count
+  holds between 3,072 and 3,071 plus its last epoch's entries, so it usually
+  has one bucket; a span whose last epoch is large has more.
 - The span seals `SEAL_DEPTH` blocks after its last block.
 
 Long spans are the point: a wallet checks one first-contact tag per address it
@@ -618,7 +619,9 @@ A wallet uses this table for two things: to locate its note commitment
   whole epoch; for an open scope it is the epoch's blocks up to the anchor.
 - The client MUST validate the whole row before trusting either answer:
   sorted order, zero padding, every `blk_height` inside the scope's range, and
-  every entry's placement hash equal to this row and bucket.
+  every entry's placement hash equal to this row and bucket. Registry rows add
+  one check: every entry's `key16` equals the first 16 bytes of the digest of
+  its `addr` (section 9.1).
 
 ### 8.5 Journal
 
@@ -753,7 +756,7 @@ addressed by digest.
 
 | Route | Returns |
 |---|---|
-| `GET map` | The map head (JSON, at most 16 KiB), with header `X-Map-Sha256` |
+| `GET map` | The map head (JSON, at most 1 MiB), with header `X-Map-Sha256` |
 | `GET map/{base}/{sha256}` | An immutable chunk describing 32 scopes starting at scope index `base` |
 | `GET public/{session_id}` | Public setup material for one table (octet-stream, immutable) |
 | `POST query` | One encrypted row query |
@@ -792,7 +795,17 @@ Head:
   `last_height`; chunk `c` holds the entries with sequences
   `c × REGISTRY_CHUNK_ENTRIES` up to that plus `entries`. An empty log is
   published with one open chunk 0 holding no entries.
-- `floor_scope` is the oldest scope this provider serves (section 11.5).
+- `floor_scope` is the scope index (below) of the oldest scope this provider
+  serves (section 11.5).
+- The head is at most `MAX_MAP_HEAD_BYTES = 1 MiB`. Open scopes list their
+  tables in the head, and one open scope can reach 64 buckets × 8 segments,
+  about 512 tables of about 330 bytes each; two such scopes must fit.
+- Encoding: hex is lowercase; integers are little-endian wherever this
+  document hashes or stores them; the map head and map chunk objects are
+  compact JSON (no whitespace) with fields in the order shown in this section,
+  so two publishers on the same chain produce identical chunk digests
+  (section 6.5). `recovery_epoch` is a JSON string holding the decimal of a
+  positive u64, as in `wallet-pir`'s maps; `generation` is a JSON number.
 
 Scope:
 
@@ -823,8 +836,13 @@ Table:
 }
 ```
 
-A sealed scope's `last_height` is the last block of its epoch, span or chunk.
-For an open scope it is the anchor height.
+A scope's `last_height` is the last block of its epoch or span. For the newest
+scope, which is open, it is the anchor height. An older scope that is still
+open (its last block is less than `SEAL_DEPTH` below the tip) ends at its own
+last block.
+
+Tables are listed in ascending `(bucket, segment)` order. Every bucket of a
+scope that has entries has a segment-0 table, possibly with zero entries.
 
 Scope listing:
 
@@ -833,6 +851,11 @@ Scope listing:
   (0, 1, 2, …), and `chunk_id` for registry.
 - Every scope from index 0 up to the newest is listed exactly once: sealed
   scopes in map chunks, open scopes in `open_scopes`, in ascending index.
+- The registry always has exactly one open chunk, at index
+  `log_sequence / REGISTRY_CHUNK_ENTRIES` holding
+  `log_sequence % REGISTRY_CHUNK_ENTRIES` entries; every sealed chunk holds
+  exactly `REGISTRY_CHUNK_ENTRIES`. A chunk that has just filled is therefore
+  sealed, and the next, empty chunk is open.
 - Map chunk `k` describes the sealed scopes with index in
   `32k .. 32k + 32`. It is the JSON object
   `{"protocol": "<protocol>", "base": 32k, "scopes": [Scope, …]}`, refusing
@@ -1255,6 +1278,7 @@ until wallets publish envelopes.
 | `REGISTRY_CHUNK_ENTRIES` | 3,072 | Provisional (D3) |
 | `REGISTRY_CHALLENGE_SECONDS` | 600 | Provisional |
 | `MAP_CHUNK_SCOPES` | 32 | From `wallet-pir` txid |
+| `MAX_MAP_HEAD_BYTES` | 1 MiB | This spec (section 10.3) |
 | `GEOMETRY` (published) | `tachyon-4k8` | Version 1 (section 6.1) |
 
 ## 16. Open decisions
