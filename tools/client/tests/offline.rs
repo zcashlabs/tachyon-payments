@@ -2,7 +2,8 @@
 //! digests, floor refusal and empty scopes.
 
 use tachyon_pir_cli::{
-    Client, ClientError, Coverage, MapHead, MapView, ScopeSelector, Stats, parse_key, query_body,
+    Client, ClientError, Coverage, LookupOutcome, MapHead, MapView, ScopeSelector, Stats,
+    parse_floor_header, parse_key, query_body,
 };
 use tachyon_pir_protocol::{
     BlockHash, Bytes32, ChainMapChunk, ChainMapHead, Geometry, HEADER_BYTES, Product,
@@ -93,12 +94,16 @@ fn memo_map() -> (ChainMapHead, Vec<u8>) {
 }
 
 fn memo_view() -> MapView {
+    memo_view_with_host_floor(0)
+}
+
+fn memo_view_with_host_floor(host_floor: u64) -> MapView {
     let (head, chunk) = memo_map();
     let bytes = head.to_bytes().unwrap();
     let sha = map_sha256(&bytes);
     let (head, digest) = MapHead::from_response(Product::Memo, Some(&sha.hex()), &bytes).unwrap();
     let chunk = head.parse_chunk(Product::Memo, 0, &chunk).unwrap();
-    MapView::build(Product::Memo, digest, head, vec![chunk]).unwrap()
+    MapView::build(Product::Memo, digest, head, vec![chunk], host_floor).unwrap()
 }
 
 #[test]
@@ -335,7 +340,7 @@ fn registry_map_coverage_is_by_sequence() {
     let bytes = head.to_bytes().unwrap();
     let sha = map_sha256(&bytes);
     let (parsed, digest) = MapHead::from_response(product, Some(&sha.hex()), &bytes).unwrap();
-    let view = MapView::build(product, digest, parsed, Vec::new()).unwrap();
+    let view = MapView::build(product, digest, parsed, Vec::new(), 0).unwrap();
     let (_, scope) = view.scope(ScopeSelector::Index(0)).unwrap();
     assert_eq!(
         scope.coverage(),
@@ -380,4 +385,89 @@ fn origins_must_be_http_urls() {
         Client::new("https://x", Product::Memo, Some(b"not a pem")),
         Err(ClientError::Certificate(_))
     ));
+}
+
+#[test]
+fn floor_header_must_be_a_decimal_scope_index() {
+    assert_eq!(parse_floor_header(Some("0")).unwrap(), 0);
+    assert_eq!(parse_floor_header(Some(" 3 ")).unwrap(), 3);
+    for bad in [
+        None,
+        Some(""),
+        Some(" "),
+        Some("x"),
+        Some("+1"),
+        Some("-1"),
+        Some("1.0"),
+        Some("0x1"),
+        Some("18446744073709551616"),
+    ] {
+        assert!(
+            matches!(
+                parse_floor_header(bad),
+                Err(ClientError::FloorHeader { .. })
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn host_floor_must_name_a_listed_scope() {
+    let (head, chunk) = memo_map();
+    let bytes = head.to_bytes().unwrap();
+    let sha = map_sha256(&bytes);
+    let (head, digest) = MapHead::from_response(Product::Memo, Some(&sha.hex()), &bytes).unwrap();
+    let chunk = head.parse_chunk(Product::Memo, 0, &chunk).unwrap();
+    // Three scopes are listed: index 2 is the newest.
+    MapView::build(Product::Memo, digest, head.clone(), vec![chunk.clone()], 2).unwrap();
+    assert!(matches!(
+        MapView::build(Product::Memo, digest, head, vec![chunk], 3),
+        Err(ClientError::FloorHeader { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_larger_floor_wins() {
+    let client = Client::new(DEAD_ORIGIN, Product::Memo, None).unwrap();
+    // Host floor 2 above the head's floor 1: scope 1 is refused too.
+    let view = memo_view_with_host_floor(2);
+    assert_eq!(
+        (
+            view.floor_scope(),
+            view.host_floor_scope(),
+            view.head().floor_scope()
+        ),
+        (2, 2, 1)
+    );
+    for index in [0, 1] {
+        assert_eq!(
+            client
+                .lookup(&view, ScopeSelector::Index(index), &[0x77; 16])
+                .await
+                .unwrap(),
+            LookupOutcome::BelowFloor {
+                scope_index: index,
+                floor_scope: 2
+            }
+        );
+        assert!(matches!(
+            client.dummy_query(&view, ScopeSelector::Index(index)).await,
+            Err(ClientError::BelowFloor { floor_scope: 2, .. })
+        ));
+    }
+    // Host floor 0 below the head's floor 1: the head's floor applies.
+    let view = memo_view_with_host_floor(0);
+    assert_eq!(view.floor_scope(), 1);
+    assert!(matches!(
+        client
+            .lookup(&view, ScopeSelector::Index(0), &[0x77; 16])
+            .await
+            .unwrap(),
+        LookupOutcome::BelowFloor {
+            scope_index: 0,
+            floor_scope: 1
+        }
+    ));
+    assert_eq!(client.stats(), Stats::default());
 }

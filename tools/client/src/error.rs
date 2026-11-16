@@ -114,6 +114,10 @@ pub enum ClientError {
         header: Option<String>,
         actual: Bytes32,
     },
+    /// `X-Floor-Scope` missing, not a decimal scope index, or above the
+    /// newest listed scope (spec 11.5: the host always sends it).
+    #[error("map: X-Floor-Scope {header:?} is missing or invalid")]
+    FloorHeader { header: Option<String> },
     #[error("map: {0}")]
     Map(#[from] MapError),
     /// A map chunk whose bytes do not hash to the head's reference.
@@ -200,6 +204,7 @@ impl ClientError {
             ClientError::UnexpectedStatus { .. } => "unexpected_status",
             ClientError::TooLarge { .. } => "too_large",
             ClientError::MapHeader { .. } => "map_header",
+            ClientError::FloorHeader { .. } => "floor_header",
             ClientError::Map(_) => "map",
             ClientError::ChunkDigest { .. } => "chunk_digest",
             ClientError::NonCanonical(_) => "non_canonical",

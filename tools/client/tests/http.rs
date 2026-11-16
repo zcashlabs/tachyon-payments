@@ -274,6 +274,8 @@ struct Server {
     generation: AtomicUsize,
     query_faults: Mutex<VecDeque<Fault>>,
     public_fault: Mutex<Option<PublicFault>>,
+    /// The `X-Floor-Scope` value sent on `GET map`; `None` omits it.
+    floor_header: Mutex<Option<String>>,
     /// Node JSON-RPC: block hashes by height, display order.
     blocks: Mutex<HashMap<u64, String>>,
     counters: Counters,
@@ -348,6 +350,11 @@ async fn map_head(State(server): State<Arc<Server>>, Path(product): Path<String>
     response
         .headers_mut()
         .insert("x-map-sha256", HeaderValue::from_str(&sha.hex()).unwrap());
+    if let Some(floor) = server.floor_header.lock().unwrap().clone() {
+        response
+            .headers_mut()
+            .insert("x-floor-scope", HeaderValue::from_str(&floor).unwrap());
+    }
     response
 }
 
@@ -473,6 +480,7 @@ impl Harness {
             generation: AtomicUsize::new(0),
             query_faults: Mutex::new(VecDeque::new()),
             public_fault: Mutex::new(None),
+            floor_header: Mutex::new(Some("0".into())),
             blocks: Mutex::new(blocks),
             counters: Counters::default(),
             log: Mutex::new(Vec::new()),
@@ -906,4 +914,64 @@ async fn binary_prints_json_results() {
     assert!(!ok);
     assert_eq!(error["error"]["kind"], "overloaded");
     assert_eq!(error["error"]["retry_after_seconds"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_floor_above_the_head_floor_is_refused_without_a_query() {
+    let harness = Harness::start().await;
+    let fixture: &Fixture = &FIXTURE;
+    *harness.server.floor_header.lock().unwrap() = Some("1".into());
+    let client = harness.client(Product::Memo);
+    let map = client.fetch_map().await.unwrap();
+    assert_eq!(map.head().floor_scope(), 0);
+    assert_eq!((map.host_floor_scope(), map.floor_scope()), (1, 1));
+
+    let outcome = client
+        .lookup(&map, ScopeSelector::Index(0), &fixture.inputs.repeated)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        LookupOutcome::BelowFloor {
+            scope_index: 0,
+            floor_scope: 1
+        }
+    );
+    assert!(matches!(
+        client.dummy_query(&map, ScopeSelector::Id(0)).await,
+        Err(ClientError::BelowFloor {
+            scope_index: 0,
+            floor_scope: 1
+        })
+    ));
+    assert_eq!(harness.served().3, 0, "no query below the floor");
+    // The scope at the floor is still served.
+    let key = key16("memo1", 4);
+    assert!(matches!(
+        client
+            .lookup(&map, ScopeSelector::Index(1), &key)
+            .await
+            .unwrap(),
+        LookupOutcome::Found { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_or_malformed_floor_header_is_refused() {
+    let harness = Harness::start().await;
+    let client = harness.client(Product::Memo);
+    for header in [None, Some("x"), Some("-1"), Some(""), Some("2")] {
+        *harness.server.floor_header.lock().unwrap() = header.map(str::to_owned);
+        match client.fetch_map().await {
+            Err(ClientError::FloorHeader { header: got }) => {
+                // "2" parses but is above the newest scope (index 1).
+                let want = header.map(str::to_owned);
+                assert_eq!(got, want, "{header:?}");
+            }
+            other => panic!("{header:?}: {other:?}"),
+        }
+    }
+    assert!(client.current_map().is_none());
+    *harness.server.floor_header.lock().unwrap() = Some("0".into());
+    assert_eq!(client.fetch_map().await.unwrap().floor_scope(), 0);
 }

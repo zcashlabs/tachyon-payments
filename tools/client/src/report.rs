@@ -61,7 +61,9 @@ pub fn map_json(map: &MapView) -> Value {
         "genesis_hash": head.genesis_hash().display_hex(),
         "generation": head.generation(),
         "recovery_epoch": head.recovery_epoch().to_string(),
-        "floor_scope": head.floor_scope(),
+        "floor_scope": map.floor_scope(),
+        "head_floor_scope": head.floor_scope(),
+        "host_floor_scope": map.host_floor_scope(),
         "sealed_chunks": head.sealed_chunks().len(),
         "scopes": map.scopes().iter().enumerate()
             .map(|(i, s)| scope_json(i as u64, s)).collect::<Vec<_>>(),

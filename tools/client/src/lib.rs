@@ -27,4 +27,6 @@ pub use client::{
     query_body,
 };
 pub use error::{ClientError, Route, parse_retry_after, status_error};
-pub use map_view::{Coverage, MapChunkScopes, MapHead, MapView, ScopeSelector, ViewScope};
+pub use map_view::{
+    Coverage, MapChunkScopes, MapHead, MapView, ScopeSelector, ViewScope, parse_floor_header,
+};

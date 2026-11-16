@@ -230,24 +230,44 @@ pub enum Coverage {
     },
 }
 
-/// A map head with every sealed chunk, validated as a whole listing.
+/// Parses the `X-Floor-Scope` header a host sends on every `GET map`
+/// (spec 11.5): the decimal scope index of the oldest scope it serves. A
+/// missing or malformed header is refused.
+pub fn parse_floor_header(header: Option<&str>) -> Result<u64, ClientError> {
+    let refuse = || ClientError::FloorHeader {
+        header: header.map(str::to_owned),
+    };
+    let text = header.ok_or_else(refuse)?.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(refuse());
+    }
+    text.parse::<u64>().map_err(|_| refuse())
+}
+
+/// A map head with every sealed chunk, validated as a whole listing, and the
+/// floor of the host that served it.
 #[derive(Clone, Debug)]
 pub struct MapView {
     product: Product,
     map_sha256: Bytes32,
     head: MapHead,
+    /// The serving host's `X-Floor-Scope`.
+    host_floor: u64,
     scopes: Vec<ViewScope>,
     by_id: HashMap<u64, usize>,
 }
 
 impl MapView {
-    /// Assembles a view from a checked head and its chunks in position order,
-    /// running the whole-listing check (`check_listing`).
+    /// Assembles a view from a checked head, its chunks in position order and
+    /// the host's `X-Floor-Scope` value, running the whole-listing check
+    /// (`check_listing`). A host floor must name a listed scope (0 when none
+    /// is listed).
     pub fn build(
         product: Product,
         map_sha256: Bytes32,
         head: MapHead,
         chunks: Vec<MapChunkScopes>,
+        host_floor: u64,
     ) -> Result<MapView, ClientError> {
         let mut scopes = Vec::new();
         match &head {
@@ -303,10 +323,17 @@ impl MapView {
                 .into());
             }
         }
+        let newest = (scopes.len() as u64).saturating_sub(1);
+        if host_floor > newest {
+            return Err(ClientError::FloorHeader {
+                header: Some(host_floor.to_string()),
+            });
+        }
         Ok(MapView {
             product,
             map_sha256,
             head,
+            host_floor,
             scopes,
             by_id,
         })
@@ -325,8 +352,16 @@ impl MapView {
         &self.head
     }
 
+    /// The effective floor (spec 11.5): the larger of the head's
+    /// `floor_scope` and the host's `X-Floor-Scope`. Scopes below it are
+    /// refused without a request.
     pub fn floor_scope(&self) -> u64 {
-        self.head.floor_scope()
+        self.head.floor_scope().max(self.host_floor)
+    }
+
+    /// The host's `X-Floor-Scope`, as received with this map.
+    pub fn host_floor_scope(&self) -> u64 {
+        self.host_floor
     }
 
     pub fn genesis_hash(&self) -> &BlockHash {

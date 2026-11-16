@@ -30,10 +30,13 @@ let answer = client.dummy_query(&map, ScopeSelector::Index(9)).await?;   // spec
   `GET map/{base}/{sha256}` unless cached by digest, checked against its digest,
   its position and the head, and must be canonical; then the whole listing is
   checked. A map naming another network or genesis than the first one the
-  client accepted is refused. Returns a `MapView` with every scope by index and
+  client accepted is refused. The host's `X-Floor-Scope` header is required
+  (missing, malformed or above the newest scope is `FloorHeader`); the view's
+  `floor_scope()` is the larger of it and the head's `floor_scope` (spec 11.5),
+  and `host_floor_scope()` reports the header alone. Returns a `MapView` with every scope by index and
   by `scope_id`.
 - `lookup(map, scope, key)`: `key` is the stored key (`key16`, or the full
-  tachygram). A scope below `floor_scope` returns `BelowFloor` without a
+  tachygram). A scope below the effective floor returns `BelowFloor` without a
   request. A scope with no tables returns `Absent` without a request.
   Otherwise the query plan (`ScopeTables::query_plan`) names the bucket under
   the scope seed and every segment of it with its own row. For each:

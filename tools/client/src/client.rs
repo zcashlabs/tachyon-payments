@@ -19,7 +19,9 @@ use tachyon_pir_protocol::{
 use zakura_pir_client::native::{P8, ProfileClientExt as _};
 
 use crate::error::{ClientError, MAX_ERROR_BODY_BYTES, Route, status_error};
-use crate::map_view::{Coverage, MapChunkScopes, MapHead, MapView, ScopeSelector, ViewScope};
+use crate::map_view::{
+    Coverage, MapChunkScopes, MapHead, MapView, ScopeSelector, ViewScope, parse_floor_header,
+};
 
 /// The largest map chunk accepted: 32 scopes of up to 512 tables of about
 /// 330 bytes is 5.4 MB; the bound leaves room.
@@ -274,6 +276,8 @@ impl Client {
     }
 
     /// Fetches `GET map` and every sealed chunk, and validates the listing.
+    /// The host's `X-Floor-Scope` header is required; the view's floor is the
+    /// larger of it and the head's `floor_scope` (spec 11.5).
     /// Chunks are fetched only when not cached by digest. Sends no retries.
     pub async fn fetch_map(&self) -> Result<Arc<MapView>, ClientError> {
         self.counters.map_heads.fetch_add(1, Ordering::Relaxed);
@@ -283,8 +287,13 @@ impl Client {
             .get("x-map-sha256")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let floor = response
+            .headers()
+            .get("x-floor-scope")
+            .map(|v| v.to_str().unwrap_or("\u{fffd}").to_owned());
         let body = read_ok(Route::Map, response, MAX_MAP_HEAD_BYTES).await?;
         let (head, sha256) = MapHead::from_response(self.product, header.as_deref(), &body)?;
+        let host_floor = parse_floor_header(floor.as_deref())?;
         self.pin_chain(&head)?;
 
         let refs = head.sealed_chunks().to_vec();
@@ -316,6 +325,7 @@ impl Client {
             sha256,
             head,
             chunks.iter().map(|c| (**c).clone()).collect(),
+            host_floor,
         )?;
         // Keep only the chunks this map names.
         let named: HashSet<Bytes32> = refs.iter().map(|r| r.sha256).collect();
