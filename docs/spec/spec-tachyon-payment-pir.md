@@ -194,7 +194,8 @@ A new Cargo workspace at `tachyon-payments/`. Package layout follows
 
 Cargo features select products independently on both hosts: `memo`,
 `first-contact`, `tachygram`, `registry`. Default is none. A configuration
-section for a product that was not compiled in MUST be rejected at start-up.
+section for a product that was not compiled in MUST be rejected at start-up,
+even when its `enabled` is false.
 
 Dependency rules, enforced by a boundary check in CI as in
 `wallet-pir/tools/ci/boundary.py`:
@@ -1140,9 +1141,16 @@ Publisher:
 }
 ```
 
-- `pir_publisher::run_registered` hosts the products. It requires every
+- `pir_publisher::run_registered` hosts the products. It requires
+  `management_listen` to be a loopback address with a fixed port, every
   product listener to be a private address with a fixed port, one listener per
   product definition, and disjoint state directories between definitions.
+- `chain` is required whenever any product is enabled; the registry reads only
+  the network identity from it (the genesis hash of its distribution scope,
+  section 11.3). `chain.epoch_length` is required and has no default.
+- A product that stops is reported `failed` on `/ready` and is not restarted
+  in-process (`run_registered`'s policy); the process supervisor restarts the
+  publisher.
 - `first_contact` shares the memo state directory (`memo-v1.sqlite`) and
   requires `memo` to be enabled. Memo and first-contact therefore run as **one**
   publisher definition on the memo listener, serving both distribution
