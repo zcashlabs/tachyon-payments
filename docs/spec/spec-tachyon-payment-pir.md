@@ -928,6 +928,12 @@ JSON body `{"code": "...", "message": "..."}`, as Enhance returns.
 | 429 | `overloaded` | Admission refused; `Retry-After: 1` | Retry later |
 | 503 | `temporarily_unavailable` | Not ready or no serving authority | Retry later |
 
+Any other refusal (unknown route, wrong method, a chunk `base` that does not
+match its digest) carries an `invalid_request` body with its status; an
+internal failure answers `503`. Revocations are held in memory, so after a
+host restart a revoked session answers `409`, not `410`; the client's action
+(refetch the map) is the same.
+
 `GET map/{base}/{sha256}` for a chunk the host does not hold, and
 `GET public/{session_id}` for a session it does not serve, answer as
 `POST query` does. `503` MAY carry `Retry-After`.
@@ -1077,7 +1083,8 @@ hours. Unbounded retention is not affordable on one host.
   object built by the publisher, whose `floor_scope` is always 0, so a host
   cannot rewrite it. A host that retains fewer scopes reports its floor, as a
   scope index, in an `X-Floor-Scope` header on `GET map`, and answers a session
-  below its floor with `409`. A client takes the larger of the two floors.
+  below its floor with `409`. The host always sends `X-Floor-Scope`, `0` when
+  it retains every scope. A client takes the larger of the two floors.
 - A query for a scope below the floor has no session and cannot be formed; the
   wallet learns the floor from the map and reports "below this provider's
   floor" to its caller.
@@ -1094,7 +1101,9 @@ work, as it is for Receiver.
 per product over `pir_sync_manager::HttpsSource`.
 
 - It checks `/.well-known/pir-service-discovery` before start and before each
-  sync pass, and exits on a confirmed major-version mismatch. The publisher
+  sync pass. Before start, any discovery failure, including an unreachable
+  publisher, stops start-up, as in `wallet-pir`; afterwards it exits on a
+  confirmed major-version mismatch. The publisher
   serves that document only on its management listener, so the TLS edge in
   front of the publisher routes this path there and every other path to the
   product listener.
@@ -1158,6 +1167,14 @@ Query server:
 ```
 
 `publisher_ca` is optional; without it the system roots are used.
+
+- Chain products also set `activation_height` and `epoch_length`. With
+  `publisher_genesis` they fix the distribution scope (section 11.3), and every
+  map the host accepts must state the same values.
+- `admission` (optional) sets the section 10.6 values: `executing` (2),
+  `waiting` (8), `wait_ms` (2,000), `per_client` (2) and `upload_ms` (the
+  section 10.4 upload deadline, 15,000). `poll_ms` (1,000) sets the sync
+  cadence and `max_unconfirmed_seconds` (600) the window of section 11.6.
 
 Both binaries accept `--config FILE` and `--check` (validate offline).
 
