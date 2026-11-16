@@ -1010,8 +1010,28 @@ Each product implements `pir_pipeline::Publication` and `Publisher` and uses
   itself over the `pir_publication` types, as Receiver's distribution does.
 - The descriptor carries the map head's object reference, `generation` and
   `recovery_epoch`. `generation` is this product's own durable counter,
-  incremented by every publication; `recovery_epoch` is the authority
-  fence's.
+  strictly increasing across publications; an attempt that fails may leave a
+  gap. `recovery_epoch` is the authority fence's.
+- `PublicationScope` is `{ product: <schema string>, chain: genesis_hash,
+  source }`, where for the chain products
+  `source = SHA-256("tachyon-pir/v1/distribution-source\0" || "chain\0" ||
+  activation_height(u64 LE) || epoch_length(u64 LE))` and for the registry
+  `source = SHA-256("tachyon-pir/v1/distribution-source\0" || "registry\0" ||
+  REGISTRY_CHUNK_ENTRIES(u64 LE))`. A query host refuses a publication from
+  any other scope.
+- The **inventory** (itself an object, named by the envelope) lists the map
+  head, every map chunk, `newest_scope`, and per table
+  `{scope_index, session_id, rows, public}` (rows exactly 4,096 × 8,192 bytes,
+  public exactly 45,056 bytes), and the authority subject: for the chain
+  products the anchor and the last block of each open scope, for the registry
+  `log_sequence`. It is at most `MAX_INVENTORY_BYTES = 16 MiB`, which holds
+  about 60,000 tables; an archive tier (section 11.5) is the answer when
+  history outgrows it. A map chunk is at most `MAX_MAP_CHUNK_BYTES = 8 MiB`.
+- An authority check carries at most 256 subjects and
+  `MAX_CHECK_BLOCKS = 4,096` blocks in total.
+- The publisher keeps the objects of a displaced publication for
+  `PUBLISHER_RETENTION_SECONDS = 600` and collects objects nothing retains
+  (normative rule 5).
 - Distribution schema strings: `tachyon-<product>-prepared-distribution-v1`.
 - The five normative rules of `wallet-pir/docs/spec/spec-publisher-ingest-model.md`
   apply as written.
@@ -1031,7 +1051,11 @@ something, coalesced to one active and one pending, as Enhance does.
   `AuthorityTransition::Withdraw` if the current publication's anchor is above
   the kept block. Either transition is durable before the journal rewinds.
 - A publisher restart always starts a new recovery epoch, as
-  `PublicationAuthority` requires.
+  `PublicationAuthority` requires. After the restart the publisher republishes
+  its previous publication under the new epoch and a new generation, provided
+  its anchor is still canonical. Only the map head is reissued (it carries
+  `generation` and `recovery_epoch`); table objects and session ids are
+  unchanged, so query hosts prepare nothing.
 
 ### 11.5 Retention
 
@@ -1040,8 +1064,11 @@ Every sealed table costs resident memory on each query host (about 160 MiB by
 hours. Unbounded retention is not affordable on one host.
 
 - Each product has `retain_scopes` in query-server configuration. The host
-  serves the newest `retain_scopes` scopes and reports the oldest as
-  `floor_scope`.
+  serves the newest `retain_scopes` scopes. The map head is a content-addressed
+  object built by the publisher, whose `floor_scope` is always 0, so a host
+  cannot rewrite it. A host that retains fewer scopes reports its floor, as a
+  scope index, in an `X-Floor-Scope` header on `GET map`, and answers a session
+  below its floor with `409`. A client takes the larger of the two floors.
 - A query for a scope below the floor has no session and cannot be formed; the
   wallet learns the floor from the map and reports "below this provider's
   floor" to its caller.
@@ -1068,6 +1095,11 @@ per product over `pir_sync_manager::HttpsSource`.
   switches to the new publication. A partial publication is never served.
 - It keeps the displaced publication for 600 s so in-flight queries finish.
 - It answers `503` for a product's namespace until that product is ready.
+- While the publisher is unreachable it keeps serving what the last successful
+  authority check confirmed, for `max_unconfirmed_seconds` (configuration,
+  default 600) after that check started, and then answers `503` until a check
+  succeeds again. A withdrawal, a new recovery epoch or a refuted subject
+  stops serving at once. This is "within its authority rules" in scenario 11.
 
 ### 11.7 Configuration
 
@@ -1288,6 +1320,11 @@ until wallets publish envelopes.
 | `REGISTRY_CHALLENGE_SECONDS` | 600 | Provisional |
 | `MAP_CHUNK_SCOPES` | 32 | From `wallet-pir` txid |
 | `MAX_MAP_HEAD_BYTES` | 1 MiB | This spec (section 10.3) |
+| `MAX_MAP_CHUNK_BYTES` | 8 MiB | This spec (section 11.3) |
+| `MAX_INVENTORY_BYTES` | 16 MiB | This spec (section 11.3) |
+| `MAX_CHECK_BLOCKS` | 4,096 | From `wallet-pir` Receiver |
+| `PUBLISHER_RETENTION_SECONDS` | 600 | This spec (section 11.3) |
+| `max_unconfirmed_seconds` (default) | 600 | Configuration (section 11.6) |
 | `GEOMETRY` (published) | `tachyon-4k8` | Version 1 (section 6.1) |
 
 ## 16. Open decisions
