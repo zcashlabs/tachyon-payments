@@ -1,0 +1,24 @@
+[package]
+name = "tachyon-pir-table"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The shared bucket-row table of the Tachyon payment PIR services: build, validate, segment, digest, and the P8 table runtime (spec sections 6 and 10.3-10.4)"
+
+[dependencies]
+rayon = "1"
+# The P8 scan kernel (spec 6.6).
+reinspiring = { workspace = true }
+sha2 = "0.10"
+tachyon-pir-protocol = { path = "../tachyon-pir-protocol" }
+thiserror = "2"
+# Native 8-bit profile: P8, sizes, hint, preprocessing, publication, upload
+# parsing and reply packing (spec 6.6).
+zakura-pir-protocol = { workspace = true, features = ["native"] }
+zakura-pir-query-server = { workspace = true }
+zakura-pir-server-core = { workspace = true }
+
+[dev-dependencies]
+# Client-side query construction and decoding, for round-trip tests only.
+zakura-pir-client = { workspace = true, features = ["native"] }

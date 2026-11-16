@@ -242,7 +242,9 @@ The held size on this CPU is below wallet-pir's bound because the compiled
 matrix is stored packed at 27 bits on AVX-512 VBMI hosts
 (`wp/src/transparent/transparent-shared/src/runtime/cache/tests.rs:348-353`).
 Plan with the bound (144.17 / 160.17 MiB) plus a transient build peak of a
-few hundred MiB. **Only the 16-32 MiB database term depends on rows**; the four
+few hundred MiB. Held bytes are data-dependent: `tachyon-pir-table` measured
+160.17 MiB (the bound) for a sparse memo table, against 141.67 MiB here on
+pseudo-random rows. **Only the 16-32 MiB database term depends on rows**; the four
 compiled matrices (about 32 MiB each) depend on the row width
 (`runtime/parameters.rs:4-38`; `cache/tests.rs:338-346`: "the database doubles,
 the compiled matrices do not"). A `2k8` table therefore costs about 90 % of a
