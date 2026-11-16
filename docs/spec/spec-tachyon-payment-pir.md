@@ -116,7 +116,8 @@ Stamp shapes, as returned by `getblock <hash> 2` under `tx[].tachyon`:
 - JSON-RPC errors arrive with HTTP 200 and `{result: null, error: {code,
   message}}`: `-8` for a height above the tip, `-5` for an unknown block hash.
   A block reorged away may be answered either with `-5` or with
-  `confirmations: -1`; the follower MUST treat both as not canonical.
+  `confirmations: -1`; the follower MUST treat both as not canonical, and the
+  decoder rejects a block whose `confirmations` is negative.
 
 Limits from the draft ZIPs, which the decoder enforces as integrity checks once
 the node follows them (configuration flag `strict_zip_rules`, off for the alpha
@@ -449,11 +450,13 @@ is an availability cost and not a correctness or privacy failure.
 
 ### 6.5 Open and sealed tables
 
-- A scope is **open** while it can still change. Its tables are rebuilt in full
-  at every publication, as the Receiver open shard and the transaction-detail
-  recent shard are.
-- A scope is **sealed** once its last block is `SEAL_DEPTH` blocks below the
-  tip. Its tables are built once and are then immutable and content-addressed.
+- A scope is **open** while it can still change. Its entries are recomputed
+  from the journal at every publication, as the Receiver open shard and the
+  transaction-detail recent shard are. A publisher MAY reuse tables built from
+  an identical entry list, since table bytes are a pure function of it.
+- A scope is **sealed** once its last block is at least `SEAL_DEPTH` blocks
+  below the publication's anchor (`last_height + SEAL_DEPTH ≤ anchor_height`).
+  Its tables are built once and are then immutable and content-addressed.
 - `SEAL_DEPTH = 100` blocks (provisional; Enhance uses 1,000 on mainnet).
 - Table bytes are a pure function of the canonical chain and the constants in
   this document. Two publishers on the same chain MUST produce identical
@@ -602,6 +605,11 @@ permits.
 - **Source**: `tachygrams[]` of every **proof** stamp. Pointer stamps
   contribute nothing; their actions' tachygrams appear in the covering
   aggregate's stamp.
+- **Ordinal**: a tachygram entry's ordinal (section 5.2) is
+  `(blk_height, tx index in block of its stamp's transaction, position in the
+  stamp's tachygrams[])`, which is the order of `epoch_tachygrams`
+  (section 8.6). It decides which entries spill to overflow segments
+  (section 6.4).
 
 ### 8.3 Uniqueness
 
@@ -1063,7 +1071,9 @@ something, coalesced to one active and one pending, as Enhance does.
   sessions of every affected table (`410`) and rebuilds them. `withdraw_above`
   does this by applying `AuthorityTransition::Recover` to the
   `PublicationAuthority` (which also withdraws), as Status does after a
-  withdrawal. A rewind that stays inside open scopes applies
+  withdrawal. Whether a rewind reaches a sealed scope is judged against the
+  last publication in the envelope, eligible or not, so a withdrawal made
+  earlier (for example by the canonical guard) still leads to `Recover`. A rewind that stays inside open scopes applies
   `AuthorityTransition::Withdraw` if the current publication's anchor is above
   the kept block. Either transition is durable before the journal rewinds.
 - A publisher restart always starts a new recovery epoch, as
@@ -1197,6 +1207,11 @@ Both binaries accept `--config FILE` and `--check` (validate offline).
 - Product metrics, all prefixed `tachyon_<product>_`:
   `ingested_height`, `anchor_height`, `entries_total`, `open_scope_entries`,
   `segments_overflow_total`, `publication_seconds`, `sessions_revoked_total`.
+  `entries_total`, `open_scope_entries` and `segments_overflow_total` are
+  gauges describing the current publication (the `_total` names count entries
+  and segments in it, not events); `publication_seconds` is a histogram from
+  build to commit; `sessions_revoked_total` is a counter of sessions in scopes
+  reached by a sealed-scope rewind.
 - Memo adds `envelopes_invalid_total` and `state_entries_total`.
 - Registry adds `registrations_total{result}` and `pow_rejected_total`.
 
