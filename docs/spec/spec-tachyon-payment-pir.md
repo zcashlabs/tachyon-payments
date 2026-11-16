@@ -850,6 +850,11 @@ scope, which is open, it is the anchor height. An older scope that is still
 open (its last block is less than `SEAL_DEPTH` below the tip) ends at its own
 last block.
 
+`rows_sha256` is the SHA-256 of the table's `rows × 8192` row bytes in
+row-major order; `public_sha256` is the SHA-256 of its public setup bytes.
+Clients MUST refuse a map head or chunk whose bytes differ from the canonical
+encoding of the parsed value.
+
 Tables are listed in ascending `(bucket, segment)` order. Every bucket of a
 scope that has entries has a segment-0 table, possibly with zero entries.
 
@@ -922,6 +927,10 @@ JSON body `{"code": "...", "message": "..."}`, as Enhance returns.
 | 413 | `invalid_request` | Body over the limit | Do not retry |
 | 429 | `overloaded` | Admission refused; `Retry-After: 1` | Retry later |
 | 503 | `temporarily_unavailable` | Not ready or no serving authority | Retry later |
+
+`GET map/{base}/{sha256}` for a chunk the host does not hold, and
+`GET public/{session_id}` for a session it does not serve, answer as
+`POST query` does. `503` MAY carry `Retry-After`.
 
 A query host tells `409` from `410` as follows. A session in the current
 publication, or in a displaced publication still within its 600 s retention,
@@ -1174,7 +1183,9 @@ These are assumptions the servers make. They are requirements on a wallet, and
 are listed so that the wire protocol can be judged against them.
 
 - Accept `anchor_hash` independently, against its own view of the chain,
-  before using any table.
+  before using any table: for example by comparing `anchor_hash` and
+  `genesis_hash` with its node's `getblockhash anchor_height` and
+  `getblockhash 0`.
 - Authenticate memo and first-contact results by decryption, and registry
   results by recomputing the digest.
 - Validate every decoded row (section 8.4).
@@ -1210,7 +1221,9 @@ Consequences worth stating plainly:
 - The number of memo queries a wallet makes per epoch tracks its number of
   channels unless it pads. Padding policy belongs to the wallet. The server
   side provides what padding needs: a dummy query is indistinguishable from a
-  real one.
+  real one. A dummy lookup selects a bucket uniformly and queries every
+  segment of it at a uniformly random row, so its requests match a real
+  lookup's in number, sessions and sizes.
 
 ### 12.4 Registry-specific
 
