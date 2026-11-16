@@ -1932,6 +1932,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachyon-pir-publisher"
+version = "0.1.0"
+
+[[package]]
 name = "tachyon-pir-query-server"
 version = "0.1.0"
 dependencies = [

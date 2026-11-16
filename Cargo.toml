@@ -8,6 +8,10 @@ members = [
     "src/shared/tachyon-pir-table",
     # Products.
     "src/tachygram/tachygram-store",
+    "src/tachygram/tachygram-publisher",
+    # Hosts.
+    "src/tachyon-pir-publisher",
+    "src/tachyon-pir-query-server",
     # Tools.
     "tools/fixtures",
     "tools/e2e-tests",
