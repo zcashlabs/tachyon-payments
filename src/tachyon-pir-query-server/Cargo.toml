@@ -1,0 +1,77 @@
+[package]
+name = "tachyon-pir-query-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "Query host of the Tachyon payment PIR services: follows the publisher over HTTPS, prepares table runtimes and answers wallet queries for the compiled products (spec sections 10 and 11.6-11.8)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tachyon-pir-query-server"
+path = "src/main.rs"
+
+# Products are selected independently (spec 4.2); the default is none. Only
+# `tachygram` has a serving module in milestone M1. A configuration section
+# for a product without a compiled serving module is refused at start-up.
+[features]
+default = []
+memo = []
+first-contact = []
+tachygram = []
+registry = []
+
+[dependencies]
+# Routers cross into wallet-pir's pir-control and pir-observability, which are
+# on axum 0.7.
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+pir-control = { workspace = true, features = ["admission"] }
+pir-observability = { workspace = true, features = ["http"] }
+pir-pipeline = { workspace = true }
+pir-publication = { workspace = true }
+pir-sync-manager = { workspace = true }
+rayon = "1"
+# Only for `reqwest::Certificate`, the trust roots `HttpsSource` takes.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tachyon-pir-distribution = { path = "../shared/tachyon-pir-distribution" }
+tachyon-pir-protocol = { path = "../shared/tachyon-pir-protocol" }
+tachyon-pir-table = { path = "../shared/tachyon-pir-table" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+libc = "0.2"
+pir-service-discovery = { workspace = true }
+rcgen = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
+# The probe client: an independent wallet-side reader of maps, rows and error
+# bodies (a tool, not chain or ingestion code).
+tachyon-pir-cli = { path = "../../tools/client" }
+tempfile = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# Independent query construction and reply decoding (spec 6.6).
+zakura-pir-client = { workspace = true, features = ["native"] }
+
+[[test]]
+name = "serving"
+path = "tests/serving.rs"
+required-features = ["tachygram"]
+
+[[test]]
+name = "binary"
+path = "tests/binary.rs"
+required-features = ["tachygram"]
+
+[[test]]
+name = "config"
+path = "tests/config.rs"
