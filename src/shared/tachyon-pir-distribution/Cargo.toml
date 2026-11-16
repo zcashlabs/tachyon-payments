@@ -1,0 +1,32 @@
+[package]
+name = "tachyon-pir-distribution"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "Publisher-to-query-host distribution contract shared by every Tachyon PIR product: descriptor, inventory, the publisher's object store, authority and routes, and the query host's publication follower"
+
+[dependencies]
+# Routers cross into wallet-pir's host library, which is on axum 0.7.
+axum = "0.7"
+hex = "0.4"
+pir-control = { workspace = true }
+pir-pipeline = { workspace = true }
+pir-publication = { workspace = true }
+pir-sync-manager = { workspace = true }
+# Only for `reqwest::Certificate`, the trust roots `HttpsSource` takes.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "rt", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+
+[dev-dependencies]
+pir-service-discovery = { workspace = true }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
