@@ -4,18 +4,17 @@ The wallet-facing contract of the Tachyon payment PIR services, for all four
 products (memo, first-contact, tachygram, registry): constants, geometries and
 exact message sizes, PIR seeds and parameters, placement hashing, session ids,
 query framing, error bodies, entry layouts and the canonical row codec, map
-types with their client-side checks, and the registry wire types. Spec
-sections 3, 6, 7, 8.1, 8.4, 9.1-9.3, 10, 12.1 and 15
-(`docs/spec/spec-tachyon-payment-pir.md`).
+types with their client-side checks, the registry wire types, and the on-chain
+envelope parser and encoder. Spec sections 3, 5, 6, 7, 8.1, 8.4, 9.1-9.3, 10,
+12.1 and 15 (`docs/spec/spec-tachyon-payment-pir.md`).
 
 A serving library (`tools/ci/boundary.json`): no chain, ingestion, HTTP, async
 or server dependencies. It depends only on `zakura-pir-protocol` (feature
 `native`, for P8), `serde`, `serde_json`, `sha2`, `hex` and `thiserror`, and
 defines its own 32-byte types instead of using `tachyon-chain`.
 
-Not here: the on-chain envelope parser (milestone M2), table building, seed
-search and segmenting (`tachyon-pir-table`), and the registry's `pk`/`ek`
-checks and HMAC challenges (publisher side, M3).
+Not here: table building, seed search and segmenting (`tachyon-pir-table`),
+and the registry's `pk`/`ek` checks and HMAC challenges (publisher side, M3).
 
 ## API
 
@@ -137,6 +136,23 @@ pub fn leading_zero_bits(hash: &[u8; 32]) -> u32;
 pub fn solve_pow(challenge, digest, difficulty_bits) -> Option<[u8; 8]>;
 pub struct RegisterRequest { challenge, nonce, address }       // parse (exactly 1,256 bytes), encode, pow_hash
 
+// envelope: spec 5 (provisional, D1), the vMemoTachyon blob
+pub const MAGIC: [u8; 4] = *b"TPM1";
+pub const KIND_FOLLOW_UP: u8 = 0x01; KIND_FIRST_CONTACT = 0x02; KIND_WALLET_STATE = 0x03;
+pub const MAX_ENVELOPE_BYTES: usize = 19_989;               // 16 first-contact entries
+pub enum EnvelopeEntry {
+    FollowUp { tag: [u8; 32], ciphertext: Box<[u8; 128]> },
+    FirstContact { tag: [u8; 32], kem_ciphertext: Box<[u8; 1088]>, ciphertext: Box<[u8; 128]> },
+    WalletState { tag: [u8; 32], ciphertext: Vec<u8> },     // len <= 1024
+}
+impl EnvelopeEntry { kind(); tag(); key16(); encoded_len();
+                     memo_entry() -> Option<MemoEntry>; first_contact_entry() -> Option<FirstContactEntry> }
+pub struct Envelope { pub entries: Vec<EnvelopeEntry> }   // encode() -> Result<Vec<u8>, EnvelopeError>
+pub fn parse(bytes: &[u8]) -> Result<Envelope, EnvelopeError>;
+pub enum EnvelopeError { BadMagic, Truncated { field, index, offset, needed, available }, EntryCount,
+                         UnknownKind { index, kind }, StateTooLong { index, len }, ZeroKey { index },
+                         TrailingBytes { offset, count } }
+
 // bytes: spec 3
 pub struct BlockHash;      // protocol order inside; display-order hex in JSON and Display
 pub struct Bytes32;        // plain hex
@@ -186,6 +202,15 @@ All constants of spec section 15 are in `constants`, with `ROW_BYTES`,
   spans 1 to 64 epochs; an empty scope has one bucket and no tables; the
   registry has exactly one open chunk, `log_sequence / 3072` with
   `log_sequence % 3072` entries, and full sealed chunks.
+- Envelopes (spec 5, 6.2): magic `TPM1`; 1 to 16 entries; kinds 0x01, 0x02,
+  0x03 only; a wallet-state `len` of at most 1,024; consumed exactly; a
+  follow-up or first-contact tag whose `key16` is all zero invalidates the
+  envelope (wallet-state tags are not keys and are not checked). Fields are
+  read in byte order and the first failing check is the error, so the empty
+  input is `Truncated` at the magic (callers skip empty memos before parsing,
+  spec 5.2). `parse` never panics and allocates only for bodies whose bytes
+  are present; `encode` refuses exactly what `parse` refuses, so an accepted
+  input re-encodes to itself.
 
 ## Tests
 
@@ -196,3 +221,8 @@ canonical row per product and the registry digest, proof of work and body
 against `tests/vectors/vectors.json`, which `tests/vectors/generate.py`
 computes independently with Python's hashlib (`python3 -I
 tests/vectors/generate.py` regenerates it; the output is deterministic).
+`tests/envelope.rs` checks envelope round trips, every refusal and a seeded
+7,000-case mutation property (`parse` never panics; accepted bytes re-encode
+to themselves) and runs the known answers in `tests/vectors/envelope.json`,
+which `tests/vectors/envelope.py` builds with `struct` and `hashlib` (`python3
+-I tests/vectors/envelope.py` regenerates it).

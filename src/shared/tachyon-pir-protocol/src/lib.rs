@@ -1,7 +1,8 @@
 //! Wallet-facing contract of the Tachyon payment PIR services (spec
 //! `docs/spec/spec-tachyon-payment-pir.md`, section 4.2): constants, row
 //! layouts, placement hashing, PIR parameters, session ids, map and header
-//! types, error bodies and the registry wire types, for all four products.
+//! types, error bodies, the registry wire types and the on-chain envelope,
+//! for all four products.
 //!
 //! No server, chain or async dependencies: a wallet, the probe client, the
 //! publisher and the query host all build on this crate. It defines its own
@@ -15,6 +16,7 @@
 pub mod bytes;
 pub mod constants;
 pub mod entry;
+pub mod envelope;
 pub mod error_body;
 pub mod geometry;
 pub mod map;
@@ -29,6 +31,7 @@ pub mod session;
 pub use bytes::{BlockHash, Bytes32, HexError, RecoveryEpoch};
 pub use constants::*;
 pub use entry::{Entry, FirstContactEntry, MemoEntry, RegistryEntry, TachygramEntry};
+pub use envelope::{Envelope, EnvelopeEntry, EnvelopeError};
 pub use error_body::{ErrorBody, ErrorCode, ErrorStatus};
 pub use geometry::Geometry;
 pub use map::{
