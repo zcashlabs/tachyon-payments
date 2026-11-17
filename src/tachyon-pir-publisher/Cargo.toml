@@ -1,0 +1,56 @@
+[package]
+name = "tachyon-pir-publisher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The Tachyon PIR publisher binary: one chain follower hosting the compiled product publishers through wallet-pir's run_registered (spec sections 4.1, 11.7)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tachyon-pir-publisher"
+path = "src/main.rs"
+
+# Products are selected at build time; the default build hosts none (spec 4.2).
+# A configuration section for a product that is not compiled in is refused at
+# start-up. `memo`, `first-contact` and `registry` have no product library in
+# the workspace yet (milestones M2 and M3), so enabling them is a compile error
+# naming the missing crate; each becomes an optional dependency here when it
+# lands.
+[features]
+default = []
+memo = []
+first-contact = ["memo"]
+tachygram = ["dep:tachygram-publisher"]
+registry = []
+
+[dependencies]
+# Routers cross into wallet-pir's host library, which is on axum 0.7.
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+pir-pipeline = { workspace = true }
+# `chain` gives run_registered its root chain follower.
+pir-publisher = { workspace = true, features = ["chain"] }
+pir-service-discovery = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tachygram-publisher = { path = "../tachygram/tachygram-publisher", optional = true }
+tachyon-chain = { path = "../shared/tachyon-chain" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tachyon-fixtures = { path = "../../tools/fixtures" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[[test]]
+name = "tachygram"
+path = "tests/tachygram.rs"
+required-features = ["tachygram"]
