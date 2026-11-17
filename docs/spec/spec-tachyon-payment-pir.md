@@ -1065,8 +1065,9 @@ something, coalesced to one active and one pending, as Enhance does.
 
 ### 11.4 Reorgs
 
-- A rewind that stays inside open scopes produces a new generation. Sessions of
-  the rebuilt open tables change because their content changes.
+- A rewind that stays inside open scopes produces a new generation and keeps
+  `recovery_epoch`. Sessions of the rebuilt open tables change because their
+  content changes; sealed sessions are unchanged.
 - A rewind that reaches a sealed scope increments `recovery_epoch`, revokes the
   sessions of every affected table (`410`) and rebuilds them. `withdraw_above`
   does this by applying `AuthorityTransition::Recover` to the
@@ -1123,6 +1124,11 @@ per product over `pir_sync_manager::HttpsSource`.
 - It fetches objects, verifies digests, prepares runtimes and only then
   switches to the new publication. A partial publication is never served.
 - It keeps the displaced publication for 600 s so in-flight queries finish.
+- A restarted host serves the objects already verified in its state directory
+  without fetching them again (scenario 12).
+- After a failed pass, including a refused object, it retries with
+  `pir_pipeline`'s back-off (10 s, doubling, at most 120 s). A refused object
+  therefore delays the switch to the next publication by at least 10 s.
 - It answers `503` for a product's namespace until that product is ready.
 - While the publisher is unreachable it keeps serving what the last successful
   authority check confirmed, for `max_unconfirmed_seconds` (configuration,
