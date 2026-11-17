@@ -543,6 +543,10 @@ CPU only.
   holds between 3,072 and 3,071 plus its last epoch's entries, so it usually
   has one bucket; a span whose last epoch is large has more.
 - The span seals `SEAL_DEPTH` blocks after its last block.
+- Readers (query hosts, clients) can check only a span's shape: whole
+  consecutive epochs, at most `FC_SPAN_MAX_EPOCHS`. The closing rule depends on
+  per-epoch counts the map does not carry; it is the publisher's obligation,
+  checked by tests against the oracle.
 
 Long spans are the point: a wallet checks one first-contact tag per address it
 has handed out, per span, and first contacts are rare.
@@ -1110,7 +1114,9 @@ hours. Unbounded retention is not affordable on one host.
   floor" to its caller.
 - The publisher keeps every sealed object. Retention is a serving decision.
 - Default `retain_scopes`: memo 64, tachygram 64, first-contact unlimited,
-  registry unlimited.
+  registry unlimited. An absent `retain_scopes` means the product default;
+  there is no explicit "unlimited" value, and a configured value is at
+  least 1.
 
 An archive tier that serves old scopes from wider, merged tables is future
 work, as it is for Receiver.
