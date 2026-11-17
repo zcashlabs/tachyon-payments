@@ -15,13 +15,19 @@
 //!   `tachyon-node-double-test` binary.
 //! - [`client`]: HTTP clients and request helpers.
 //! - [`budget`]: the wall-clock budget every end-to-end test runs inside.
+//! - [`topology`]: a chain product's whole topology (node double, publisher,
+//!   TLS edge, query host) and the waits on its publications and maps.
+//! - [`oracle`]: the independent oracle, computed from the authored chain
+//!   only (spec 13.1).
 //!
 //! See the crate README for how a product test strings them together.
 pub mod budget;
 pub mod client;
 pub mod node;
+pub mod oracle;
 pub mod process;
 pub mod tls_edge;
+pub mod topology;
 
 pub use budget::{Budget, DEFAULT_BUDGET};
 pub use process::{Process, free_addr, free_addrs, free_port};

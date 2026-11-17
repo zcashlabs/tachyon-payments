@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 
@@ -411,6 +411,12 @@ impl EdgeBuilder {
     }
 }
 
+/// The accept loop of a listening edge.
+struct Running {
+    stop: oneshot::Sender<()>,
+    task: JoinHandle<()>,
+}
+
 /// A running TLS edge. Dropping it stops the listener and every connection.
 pub struct TlsEdge {
     shared: Arc<Shared>,
@@ -419,7 +425,7 @@ pub struct TlsEdge {
     certificate: EdgeCertificate,
     ca_path: PathBuf,
     _dir: Option<tempfile::TempDir>,
-    server: Mutex<Option<JoinHandle<()>>>,
+    server: Mutex<Option<Running>>,
 }
 
 impl TlsEdge {
@@ -548,10 +554,13 @@ impl TlsEdge {
 
     /// Stops accepting and drops every open connection (held and in-flight
     /// requests included). Connecting then fails until [`TlsEdge::resume`].
+    ///
+    /// It returns once the listener is closed and every connection task has
+    /// ended, so held requests are no longer counted by [`TlsEdge::held`].
     pub async fn outage(&self) {
-        let task = lock(&self.server).take();
-        if let Some(task) = task {
-            task.abort();
+        let running = lock(&self.server).take();
+        if let Some(Running { stop, task }) = running {
+            let _ = stop.send(());
             let _ = task.await;
         }
     }
@@ -571,19 +580,21 @@ impl TlsEdge {
     }
 
     fn launch(&self, listener: TcpListener) {
+        let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(accept_loop(
             listener,
             self.acceptor.clone(),
             self.shared.clone(),
+            stopped,
         ));
-        *lock(&self.server) = Some(task);
+        *lock(&self.server) = Some(Running { stop, task });
     }
 }
 
 impl Drop for TlsEdge {
     fn drop(&mut self) {
-        if let Some(task) = lock(&self.server).take() {
-            task.abort();
+        if let Some(running) = lock(&self.server).take() {
+            running.task.abort();
         }
     }
 }
@@ -599,12 +610,23 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     socket.listen(1024)
 }
 
-/// Accepts connections; aborting this task drops the listener and, with the
-/// `JoinSet`, every connection it serves.
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: Arc<Shared>) {
+/// Accepts connections until `stop` fires (or its sender is dropped), then
+/// closes the listener and aborts every connection, waiting for each to end.
+/// Aborting this task instead (on drop) drops them without waiting.
+async fn accept_loop(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    shared: Arc<Shared>,
+    mut stop: oneshot::Receiver<()>,
+) {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
+            _ = &mut stop => {
+                drop(listener);
+                connections.shutdown().await;
+                return;
+            }
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
                     connections.spawn(serve(stream, peer, acceptor.clone(), shared.clone()));

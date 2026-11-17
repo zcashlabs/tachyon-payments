@@ -250,6 +250,36 @@ async fn discovery_goes_to_management_and_unrouted_paths_are_404() {
     .await
 }
 
+/// An HTTP/1.1 connection to the edge over TLS that trusts only the edge's
+/// certificate.
+async fn one_connection(
+    edge: &TlsEdge,
+) -> hyper::client::conn::http1::SendRequest<http_body_util::Empty<bytes::Bytes>> {
+    use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(edge.certificate().cert_pem.as_bytes()).unwrap())
+        .unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect(edge.addr()).await.unwrap();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    let (sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
+            .await
+            .unwrap();
+    tokio::spawn(connection);
+    sender
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bodies_stream_and_connections_are_kept_alive() {
     budget::e2e(async {
@@ -279,15 +309,39 @@ async fn bodies_stream_and_connections_are_kept_alive() {
         assert_eq!(received.len(), 2 * CHUNK);
         assert!(received[CHUNK..].iter().all(|byte| *byte == 2));
 
-        // Sequential requests on one client reuse one TLS connection.
+        // Ten sequential requests on one explicit TLS connection: the edge
+        // keeps it alive and answers every one (a hyper `SendRequest` is bound
+        // to its connection, so none can go elsewhere).
         let before = edge.connections();
-        for _ in 0..5 {
-            let body = get_bytes(&client, &edge.url(OBJECT_B), StatusCode::OK).await;
-            assert_eq!(body, object("bbbb"));
-            let _: Value = get_json(&client, &edge.url(CURRENT), StatusCode::OK).await;
+        let mut sender = one_connection(&edge).await;
+        for round in 0..5 {
+            for path in [OBJECT_B, CURRENT] {
+                let request = hyper::Request::get(path)
+                    .header("host", format!("localhost:{}", edge.port()))
+                    .body(http_body_util::Empty::<bytes::Bytes>::new())
+                    .unwrap();
+                sender.ready().await.unwrap();
+                let response = sender
+                    .send_request(request)
+                    .await
+                    .unwrap_or_else(|error| panic!("round {round} {path}: {error}"));
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = http_body_util::BodyExt::collect(response.into_body())
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                if path == OBJECT_B {
+                    assert_eq!(body, object("bbbb"));
+                } else {
+                    let current: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        current,
+                        json!({"upstream": "tachygram", "product": "tachygram"})
+                    );
+                }
+            }
         }
-        assert_eq!(edge.connections(), before);
-        assert_eq!(edge.connections(), 1);
+        assert_eq!(edge.connections(), before + 1);
     })
     .await
 }
@@ -706,9 +760,175 @@ fn reserved_ports_are_distinct_and_free() {
     assert_eq!(distinct.len(), 16);
     for addr in addrs {
         assert!(addr.ip().is_loopback() && addr.port() != 0);
-        std::net::TcpListener::bind(addr).expect("a reserved port can be bound");
+        std::net::TcpListener::bind(addr)
+            .unwrap_or_else(|error| panic!("reserved {addr} cannot be bound: {error}"));
     }
     assert_ne!(tachyon_pir_e2e_tests::free_port(), 0);
+}
+
+/// Set in the children of `reservations_are_exclusive_across_processes`.
+const PORT_CHILD: &str = "TACHYON_E2E_PORT_CHILD";
+
+/// A child process of this test binary that reserves 256 ports from a pinned
+/// pool start, reports them, and holds them until its stdin closes.
+struct PortChild {
+    child: std::process::Child,
+    lines: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+    ports: BTreeSet<u16>,
+}
+
+impl PortChild {
+    fn spawn(start: u64, locks: &std::path::Path) -> Self {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "reservations_are_exclusive_across_processes",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PORT_CHILD, "1")
+            .env("TACHYON_E2E_PORT_START", start.to_string())
+            .env("TACHYON_E2E_PORT_LOCKS", locks)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut ports = BTreeSet::new();
+        for line in lines.by_ref() {
+            let line = line.unwrap();
+            // libtest prints `test <name> ... ` without a newline first.
+            if let Some((_, list)) = line.split_once("PORTS ") {
+                ports = list
+                    .split(',')
+                    .map(|port| port.parse::<u16>().unwrap())
+                    .collect();
+                break;
+            }
+        }
+        assert_eq!(ports.len(), 256, "the child reported its reservations");
+        Self {
+            child,
+            lines,
+            ports,
+        }
+    }
+
+    /// Releases the child and checks it exited cleanly.
+    fn finish(mut self) {
+        drop(self.child.stdin.take());
+        // Drain the rest so the child can report its result and exit.
+        let rest: Vec<String> = self.lines.map(Result::unwrap).collect();
+        assert!(self.child.wait().unwrap().success(), "{rest:?}");
+    }
+}
+
+#[test]
+fn reservations_are_exclusive_across_processes() {
+    use std::io::{Read, Write};
+    let _budget = Budget::start();
+    if std::env::var_os(PORT_CHILD).is_some() {
+        // A child: reserve, report, and keep the reservations (this process)
+        // alive until the parent closes stdin.
+        let ports: Vec<String> = (0..256)
+            .map(|_| tachyon_pir_e2e_tests::free_port().to_string())
+            .collect();
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "PORTS {}", ports.join(",")).unwrap();
+        stdout.flush().unwrap();
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        return;
+    }
+    // Both children walk the pool from the same start, so without the
+    // cross-process lock they would hand out the same ports. Neither binds
+    // what it reserved: only the lock keeps the second off the first's ports.
+    // They share a private lock file, so other test processes running at the
+    // same time cannot take the ports the first one releases.
+    let dir = tempfile::tempdir().unwrap();
+    let locks = dir.path().join("ports.lock");
+    let start = u64::from(std::process::id()) * 7919;
+    let first = PortChild::spawn(start, &locks);
+    let second = PortChild::spawn(start, &locks);
+    assert!(
+        first.ports.is_disjoint(&second.ports),
+        "ports reserved by both processes: {:?}",
+        first.ports.intersection(&second.ports).collect::<Vec<_>>()
+    );
+    // Once the first exits, its ports are free to reserve again.
+    let released = first.ports.clone();
+    first.finish();
+    let third = PortChild::spawn(start, &locks);
+    assert!(third.ports.is_disjoint(&second.ports));
+    assert!(
+        !third.ports.is_disjoint(&released),
+        "a dead process's reservations are released"
+    );
+    second.finish();
+    third.finish();
+}
+
+/// The kernel's ephemeral range, read independently of the harness.
+fn ephemeral_range() -> (u16, u16) {
+    let text = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let fields: Vec<u16> = text
+        .split_whitespace()
+        .map(|field| field.parse().unwrap())
+        .collect();
+    (fields[0], fields[1])
+}
+
+#[test]
+fn concurrent_reservations_are_distinct_bindable_and_outside_the_ephemeral_range() {
+    let _budget = Budget::start();
+    let (low, high) = ephemeral_range();
+    // Others bind `:0` while the reservations run; none may land on a
+    // reserved port, because reservations avoid the ephemeral range.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ephemeral: Vec<_> = (0..2)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut seen = BTreeSet::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    seen.insert(listener.local_addr().unwrap().port());
+                }
+                seen
+            })
+        })
+        .collect();
+    let reservers: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..64)
+                    .map(|_| tachyon_pir_e2e_tests::free_addr())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let addrs: Vec<_> = reservers
+        .into_iter()
+        .flat_map(|thread| thread.join().unwrap())
+        .collect();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let ephemeral: BTreeSet<u16> = ephemeral
+        .into_iter()
+        .flat_map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(addrs.len(), 8 * 64);
+    let ports: BTreeSet<u16> = addrs.iter().map(|addr| addr.port()).collect();
+    assert_eq!(ports.len(), addrs.len(), "a port was handed out twice");
+    assert!(ports.is_disjoint(&ephemeral));
+    for addr in &addrs {
+        assert!(addr.ip().is_loopback());
+        assert!(
+            !(low..=high).contains(&addr.port()),
+            "{addr} is in the ephemeral range {low}-{high}"
+        );
+        std::net::TcpListener::bind(addr)
+            .unwrap_or_else(|error| panic!("reserved {addr} cannot be bound: {error}"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

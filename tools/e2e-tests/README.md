@@ -1,14 +1,24 @@
 # tachyon-pir-e2e-tests
 
 End-to-end tests across real HTTP boundaries (spec sections 4.1 and 13.1), and
-the harness they are written with. Today the package holds the harness library
-(`src/`) and its own tests (`tests/harness.rs`). Product end-to-end tests come
-once the publisher and the query server exist.
+the harness they are written with: the harness library (`src/`), its own tests
+(`tests/harness.rs`) and the product acceptance suites (`tests/tachygram.rs`,
+spec 13.2).
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `tachygram` | on | builds the re-declared hosts with `tachyon-pir-publisher/tachygram` and `tachyon-pir-query-server/tachygram`, and enables `tests/tachygram.rs` (`required-features`) |
+
+`tachygram` is a default feature, so `cargo test --workspace` runs the tachygram
+acceptance scenarios. A later product gets a feature of its own, built the same
+way.
 
 ## Topology a product test builds
 
 ```text
-node double ──JSON-RPC──▶ tachyon-pir-publisher ──plain HTTP──▶ TLS edge ──HTTPS──▶ tachyon-pir-query-server ◀── test client
+node double ──JSON-RPC──▶ tachyon-pir-publisher-test ──plain HTTP──▶ TLS edge ──HTTPS──▶ tachyon-pir-query-server-test ◀── probe client
 (in process or           (spawned; management +                (in process)         (spawned; trusts the edge
  spawned binary)          one listener per product)                                   through publisher_ca)
 ```
@@ -26,6 +36,8 @@ or `ChainSpec` the node double serves), never from the publisher's tables.
 | `node` | `start_node` (in-process `NodeDouble`), `SpawnedNode` (the binary from a `ChainSpec`), `rpc` |
 | `client` | `trusting(pem)`, `plain()`, `get`, `get_json`, `get_bytes`, `post_bytes`, `post_octets`, `post_json`, `Reply` |
 | `budget` | `budget::e2e(async { .. })`, `Budget`: the 25 s wall-clock guard |
+| `topology` | `Topology` (node double, publisher, TLS edge and query host of one product, from `TopologyOptions`), `PublisherHost`, `QueryHost`, `wait_for`, `wait_map`, `wait_limit`, `exclusive` |
+| `oracle` | `TachygramOracle`, `EpochSchedule`, `ExpectedScope`, `Sampler`: expected answers computed from the authored chain only |
 
 ### TLS edge
 
@@ -124,11 +136,30 @@ publisher.terminate(Duration::from_secs(10)).await;  // SIGTERM to the group, wa
 - `wait_ready(addr, timeout)` polls `GET http://<addr>/ready` every 50 ms until
   `200`. It fails at once with the logs if the process exits.
   `wait_stdout_line`, `wait_exit` and `assert_running` cover the rest.
-- `free_addrs(n)` reserves `n` distinct `127.0.0.1` ports at once (bind `:0`,
-  read, release). `run_registered` refuses port 0, so the publisher's
-  `management_listen` and product `listen` addresses come from here. Another
-  process can take a port between release and use; tests tolerate that race,
-  as `wallet-pir`'s do.
+- `free_port()`, `free_addr()` and `free_addrs(n)` reserve fixed `127.0.0.1`
+  ports for listeners bound later. `run_registered` refuses port 0, so the
+  publisher's `management_listen` and product `listen` addresses come from
+  here, and so do the query host's.
+  - Ports come from outside the kernel's ephemeral range
+    (`/proc/sys/net/ipv4/ip_local_port_range`). The pool is the larger of
+    `20000..low` and `high+1..=65535`. Nothing that binds `:0` or connects out
+    can take a reserved port between reservation and use.
+  - Within one test process, an atomic counter walks the pool from a random
+    per-process start, so reservations are distinct until the pool (over
+    10,000 ports) wraps.
+  - Across processes, a reserved port is locked until the reserving process
+    exits: a POSIX record lock on byte `port` of
+    `<temp dir>/tachyon-pir-e2e-ports.lock`. The kernel drops the locks when
+    the process exits. Other test processes skip the port even before anything
+    binds it.
+  - Each candidate is probed by binding it on `127.0.0.1` with
+    `SO_REUSEADDR` and **without listening**; a port anything else holds is
+    skipped. A listening probe would leak: `Command::spawn` on another thread
+    copies the descriptor table, and until the child's exec closes it, the
+    probe still listens and an immediate bind of the port fails.
+  - `TACHYON_E2E_PORT_START` (a fixed pool offset) and
+    `TACHYON_E2E_PORT_LOCKS` (a lock-file path) exist for the harness's own
+    exclusivity test.
 
 **Locating binaries.** `CARGO_BIN_EXE_<name>` is set only for binaries of the
 test's own package. This package therefore re-declares foreign entrypoints as
@@ -137,14 +168,18 @@ does. Cargo builds them before the tests and `binary!("<name>")` reads the
 variable at the test's compile time. A run-time `TACHYON_E2E_BIN_<NAME>`
 (upper case, `-` as `_`) overrides the path. The `-test` suffix keeps each
 output file apart from the owning package's binary in workspace builds.
-Present: `tachyon-node-double-test` (`../fixtures/src/bin/tachyon-node-double.rs`).
+Present:
 
-Adding a host: declare `[[bin]] name = "tachyon-pir-publisher-test"`,
-`path = "../../src/tachyon-pir-publisher/src/main.rs"`, `test = false`. Add the
-host crate's dependencies its `main.rs` uses. Mirror its product features
-(`memo`, `first-contact`, `tachygram`, `registry`) here, because the
-`#[cfg(feature = ..)]` in that `main.rs` resolve against this package's
-features. Use `required-features` if a host needs a feature to build.
+| Binary | Source |
+|---|---|
+| `tachyon-node-double-test` | `../fixtures/src/bin/tachyon-node-double.rs` |
+| `tachyon-pir-publisher-test` | `../../src/tachyon-pir-publisher/src/main.rs` |
+| `tachyon-pir-query-server-test` | `../../src/tachyon-pir-query-server/src/main.rs` |
+
+The host crates and the dependencies their `main.rs` use are dependencies of
+this package. Their product features are mirrored here (see Features),
+because the `#[cfg(feature = ..)]` in those `main.rs` files resolve against
+this package's features.
 
 ### Node double
 
@@ -168,48 +203,34 @@ name and elapsed time, before `tools/ci/test_budget.py` kills it at 30 s.
 
 ## How a product end-to-end test is written
 
+`topology::Topology` assembles the whole topology of spec 13.1 for one product.
+`tests/tachygram.rs` is the worked example.
+
 ```rust
 #[tokio::test(flavor = "multi_thread")]
-async fn tachygram_cold_bootstrap() {
+async fn cold_bootstrap() {
+    let _serial = exclusive().await;          // one host-spawning test at a time per binary
     let budget = Budget::start();
     budget.run(async {
-        // 1. Chain and node double: the ground truth.
-        let node = start_node(chain_with_tachygrams()).await;
-        // 2. Publisher on reserved fixed ports.
-        let ports = free_addrs(2);
-        let (management, tachygram) = (ports[0], ports[1]);
-        let mut publisher = Process::new("publisher", binary!("tachyon-pir-publisher-test"));
-        let state = publisher.state_dir("tachygram");
-        publisher.config("--config", "publisher.json", &json!({
-            "management_listen": management.to_string(),
-            "chain": {"rpc_url": node.url(), "no_auth": true, "poll_ms": 100, "epoch_length": 16},
-            "tachygram": {"enabled": true, "settings": {"listen": tachygram.to_string(), "state_dir": state}},
-        }));
-        publisher.start();
-        publisher.wait_ready(&management.to_string(), budget.remaining()).await;
-        // 3. TLS edge in front of it.
-        let edge = TlsEdge::builder()
-            .management(management.to_string())
-            .product("tachygram", tachygram.to_string())
-            .start().await.unwrap();
-        // 4. Query server trusting the edge.
-        let ports = free_addrs(2);
-        let (qmanagement, public) = (ports[0], ports[1]);
-        let mut query = Process::new("query", binary!("tachyon-pir-query-server-test"));
-        let qstate = query.state_dir("tachygram");
-        query.config("--config", "query.json", &json!({
-            "management_listen": qmanagement.to_string(), "public_listen": public.to_string(),
-            "tachygram": {"enabled": true, "settings": {
-                "publisher": edge.origin(), "publisher_ca": edge.ca_path(), "state_dir": qstate,
-                "role": "combined", "publisher_network": "test", "publisher_genesis": genesis_hex }},
-        }));
-        query.start();
-        query.wait_ready(&qmanagement.to_string(), budget.remaining()).await;
-        // 5. Look up through the public listener; compare with the oracle
-        //    computed from node.chain().
+        let chain = authored_chain();          // SyntheticChain: the ground truth
+        let oracle = TachygramOracle::new(&chain, 16);
+        let t = Topology::start(
+            chain,
+            TopologyOptions::new(ProductNames::TACHYGRAM, 16),
+            binary!("tachyon-pir-publisher-test"),
+            binary!("tachyon-pir-query-server-test"),
+            &budget,
+        ).await;
+        // t.node (in-process NodeDouble), t.publisher (PublisherHost),
+        // t.edge (TlsEdge), t.query (QueryHost, wallet() is the probe client).
+        // Wait with wait_map / wait_for inside wait_limit(&budget); compare
+        // every answer with the oracle.
     }).await
 }
 ```
+
+`Topology::launch` does the same without starting the query host. Use it when a
+test injects edge faults before the first sync.
 
 ## What the harness assumes of the hosts
 
@@ -236,5 +257,9 @@ generated certificate; discovery routing and `404`s; streaming and keep-alive;
 every fault; outage and resume on the same port; per-path counting;
 `HttpsSource` with the edge as `publisher_ca` (discovery, wrong major,
 malformed, untrusted); the `tachyon-node-double-test` binary spawned, queried,
-restarted and gone after drop; exit and readiness waits; port reservation;
-the budget guard.
+restarted and gone after drop; exit and readiness waits; port reservation
+(8 threads x 64 concurrent reservations, all distinct, bindable and outside
+the ephemeral range while other threads bind `:0`; two processes walking the
+same ports get disjoint ones, and a dead process's ports are released); the
+budget guard.
+`tests/tachygram.rs` holds the tachygram acceptance scenarios of spec 13.2.
