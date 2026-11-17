@@ -18,4 +18,6 @@ thiserror = "2"
 # The golden expectations carry a SHA-256 over each stamp's tachygrams, computed
 # by the capture script with Python's hashlib.
 sha2 = "0.10"
+# The node double, for NodeClient tests against reorged-away blocks.
+tachyon-fixtures = { path = "../../../tools/fixtures" }
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }

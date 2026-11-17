@@ -451,6 +451,38 @@ fn a_block_other_than_the_requested_one_is_refused() {
     assert_eq!(bare, decode_frozen(&raw_block(MIXED), LAX).unwrap());
 }
 
+/// A block reorged away, still served by hash with negative confirmations, is
+/// not canonical and is refused; zero, positive or absent confirmations pass.
+#[test]
+fn a_block_with_negative_confirmations_is_refused() {
+    let id = hash(&raw_block(MIXED)["hash"]);
+    assert!(raw_block(MIXED)["confirmations"].as_i64().unwrap() > 0);
+    match decode_edited(|raw| raw["confirmations"] = json!(-1)) {
+        Err(DecodeError::Stale {
+            hash,
+            confirmations: -1,
+        }) => assert_eq!(hash, id),
+        other => panic!("{other:?}"),
+    }
+    let accepted = decode_frozen(&raw_block(MIXED), LAX).unwrap();
+    assert_eq!(
+        decode_edited(|raw| raw["confirmations"] = json!(0)).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        decode_edited(|raw| {
+            raw.as_object_mut().unwrap().remove("confirmations");
+        })
+        .unwrap(),
+        accepted
+    );
+    // A wrong-typed count is a shape error, not a pass.
+    assert!(matches!(
+        decode_edited(|raw| raw["confirmations"] = json!("-1")),
+        Err(DecodeError::Shape(_))
+    ));
+}
+
 /// Hex fields must be hex of exactly their width.
 #[test]
 fn truncated_and_malformed_hex_is_refused() {
@@ -1153,5 +1185,52 @@ mod node_client {
         assert_eq!(client.options(), LAX);
         assert_eq!(u64::from(client.tip().await.unwrap().height), tip);
         assert_eq!(methods(&calls), ["getblockcount", "getblockhash"]);
+    }
+
+    /// Against the fixtures' node double serving reorged-away blocks with
+    /// `confirmations: -1`, as zcashd does: fetching such a block by hash is
+    /// refused as stale, and the block now canonical at that height is accepted.
+    #[tokio::test]
+    async fn a_reorged_away_block_from_the_node_double_is_refused() {
+        use tachyon_fixtures::{ChainConfig, NodeDouble, NodeOptions, StaleBlocks, SyntheticChain};
+        let node = NodeDouble::start(
+            SyntheticChain::generate(ChainConfig::with_seed(41), 12),
+            NodeOptions {
+                stale_blocks: StaleBlocks::Serve,
+                ..NodeOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let client = NodeClient::connect(node.url(), Credentials::None, LAX).unwrap();
+        let old = BlockId {
+            height: 10,
+            hash: client.block_hash(10).await.unwrap(),
+        };
+        assert_eq!(
+            old.hash,
+            Hash::from_protocol_bytes(node.chain().block(10).unwrap().hash())
+        );
+        assert_eq!(client.block_at(&old).await.unwrap().id, old);
+
+        node.chain().reorg_random(8, 6).unwrap();
+        for result in [client.block(&old.hash).await, client.block_at(&old).await] {
+            match result {
+                Err(NodeError::Decode(DecodeError::Stale {
+                    hash,
+                    confirmations,
+                })) => {
+                    assert_eq!(hash, old.hash);
+                    assert!(confirmations < 0);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let new = BlockId {
+            height: 10,
+            hash: client.block_hash(10).await.unwrap(),
+        };
+        assert_ne!(new.hash, old.hash);
+        assert_eq!(client.block_at(&new).await.unwrap().id, new);
     }
 }

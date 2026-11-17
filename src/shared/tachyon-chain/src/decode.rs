@@ -94,6 +94,8 @@ pub enum DecodeError {
     HeightMismatch { requested: u32, returned: u32 },
     #[error("block at height {0} has no previousblockhash")]
     MissingPrevious(u32),
+    #[error("block {hash} is not on the node's active chain (confirmations {confirmations})")]
+    Stale { hash: Hash, confirmations: i64 },
     #[error("block declares {declared} transactions and lists {listed}")]
     TxCount { declared: u64, listed: usize },
     #[error("transaction {tx_index} ({txid}) names block {named}, not {block}")]
@@ -137,6 +139,7 @@ struct RawBlock {
     previousblockhash: Option<String>,
     #[serde(rename = "nTx")]
     n_tx: Option<u64>,
+    confirmations: Option<i64>,
     tx: Vec<RawTx>,
 }
 
@@ -220,7 +223,9 @@ fn to_index(field: Field, index: usize) -> Result<u32, DecodeError> {
 /// block's Tachyon content.
 ///
 /// The block's own hash must be `requested_hash` and, when `requested_height`
-/// is given, its height must be that height. Every transaction's `blockhash`
+/// is given, its height must be that height. A block whose `confirmations` is
+/// negative (reorged away, still served by hash) is [`DecodeError::Stale`]; a
+/// missing `confirmations` is accepted. Every transaction's `blockhash`
 /// and `height`, where the node prints them, must name this block.
 pub fn decode_block(
     result: &serde_json::Value,
@@ -234,6 +239,16 @@ pub fn decode_block(
         return Err(DecodeError::HashMismatch {
             requested: *requested_hash,
             returned: hash,
+        });
+    }
+    // A block reorged away may still be served by hash, with negative
+    // confirmations (spec section 3); it is not canonical.
+    if let Some(confirmations) = raw.confirmations
+        && confirmations < 0
+    {
+        return Err(DecodeError::Stale {
+            hash,
+            confirmations,
         });
     }
     let height = to_u32(block_field("height"), raw.height)?;

@@ -65,6 +65,10 @@ verbosity 2 are called.
   requested height when one is given (`block_at`). Every transaction's
   `blockhash` and `height`, where present, must name the same block; `nTx`,
   where present, must equal the number of listed transactions.
+- A block whose `confirmations` is negative is refused as
+  `DecodeError::Stale`: the node serves a block reorged away by hash with
+  `confirmations: -1` (spec section 3), and it is not canonical. A missing
+  `confirmations` is accepted, as is zero or any positive count.
 - `previousblockhash` is required except at height 0, where `prev` is
   `Hash::ZERO` if it is absent (Zakura prints the zero hash for genesis;
   zcashd omits the field).
@@ -133,7 +137,9 @@ post-activation block without Tachyon transactions (40192) and a largest
 `tests/golden.rs` decodes every frozen block against the expectations, tests
 mismatch, hex, duplicate-txid, stamp-shape and strict-rule refusals on edited
 copies, and runs `NodeClient` over real HTTP against an in-test JSON-RPC
-responder serving the fixtures.
+responder serving the fixtures. One NodeClient test also runs against
+`tachyon_fixtures::NodeDouble` (dev-dependency) with
+`StaleBlocks::Serve`, fetching a block after it is reorged away.
 
 ### Refreshing
 
