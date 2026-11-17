@@ -8,24 +8,26 @@ mod support;
 use std::{sync::Arc, time::Duration};
 use support::*;
 use tachyon_pir_cli::{Client, LookupOutcome, Mount, ScopeSelector};
-use tachyon_pir_protocol::{ErrorCode, PUBLISHED_GEOMETRY};
+use tachyon_pir_protocol::{ErrorCode, PUBLISHED_GEOMETRY, Product};
+
+const PRODUCT: Product = Product::Tachygram;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Scope 0 (sealed) and scope 1 (open), 300 entries each.
 fn scope0() -> Arc<Fixture> {
-    fixture(0, 1, 300)
+    fixture(Spec::new(PRODUCT, 0, 1, 300))
 }
 fn scope1() -> Arc<Fixture> {
-    fixture(1, 2, 300)
+    fixture(Spec::new(PRODUCT, 1, 2, 300))
 }
 /// Scope 1 rebuilt with other entries, as after a reorg.
 fn scope1_rebuilt() -> Arc<Fixture> {
-    fixture(1, 3, 300)
+    fixture(Spec::new(PRODUCT, 1, 3, 300))
 }
 
 async fn started(scopes: &[Option<Arc<Fixture>>]) -> (tempfile::TempDir, Publisher, Edge) {
     let dir = tempdir();
-    let publisher = Publisher::start(&dir.path().join("publisher")).await;
+    let publisher = Publisher::start(PRODUCT, &dir.path().join("publisher")).await;
     publisher.publish(scopes, 1);
     let edge = Edge::start(publisher.addr).await;
     (dir, publisher, edge)
@@ -37,28 +39,6 @@ fn host_settings(edge: &Edge, dir: &tempfile::TempDir) -> serde_json::Value {
     settings(edge, &host)
 }
 
-/// Every looked-up key: `hits` entries of each fixture and as many misses.
-async fn check_answers(client: &Client, fixtures: &[&Fixture], hits: usize) {
-    let map = client.fetch_map().await.unwrap();
-    for fixture in fixtures {
-        let selector = ScopeSelector::Index(fixture.scope_id);
-        let step = fixture.entries.len() / hits;
-        for entry in fixture.entries.iter().step_by(step).take(hits) {
-            match client.lookup(&map, selector, entry.key()).await.unwrap() {
-                LookupOutcome::Found { entries, .. } => assert_eq!(entries, vec![entry.clone()]),
-                other => panic!("hit answered {other:?}"),
-            }
-        }
-        for i in 0..hits as u32 {
-            let key = missing_key(i);
-            match client.lookup(&map, selector, &key).await.unwrap() {
-                LookupOutcome::Absent { .. } => {}
-                other => panic!("miss answered {other:?}"),
-            }
-        }
-    }
-}
-
 /// Scenarios 2 and 4: cold bootstrap over TLS to ready, exact answers for
 /// hits and misses on both mounts, the map headers and cache rules, the
 /// management routes and metrics, and a clean stop.
@@ -66,7 +46,7 @@ async fn check_answers(client: &Client, fixtures: &[&Fixture], hits: usize) {
 async fn cold_bootstrap_serves_exact_answers() {
     let (s0, s1) = (scope0(), scope1());
     let (dir, _publisher, edge) = started(&[Some(s0.clone()), Some(s1.clone())]).await;
-    let host = Host::start(host_settings(&edge, &dir)).await;
+    let host = Host::start(PRODUCT, host_settings(&edge, &dir)).await;
     host.wait_ready().await;
 
     let health: serde_json::Value = reqwest::get(format!("http://{}/health", host.management))
@@ -110,9 +90,9 @@ async fn cold_bootstrap_serves_exact_answers() {
     assert_eq!(&public.bytes().await.unwrap()[..], &s1.tables[0].public[..]);
 
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0, &s1], 12).await;
+    check_answers(&client, &[(0, &s0), (1, &s1)], 12).await;
     let legacy = Client::with_mount(&host.origin(), PRODUCT, None, Mount::Legacy).unwrap();
-    check_answers(&legacy, &[&s1], 4).await;
+    check_answers(&legacy, &[(1, &s1)], 4).await;
 
     let metrics = host.metrics().await;
     for line in [
@@ -142,16 +122,16 @@ async fn cold_bootstrap_serves_exact_answers() {
 async fn incremental_publication_keeps_sealed_sessions() {
     let (s0, s1, s1b) = (scope0(), scope1(), scope1_rebuilt());
     let (dir, publisher, edge) = started(&[Some(s0.clone()), Some(s1.clone())]).await;
-    let host = Host::start(host_settings(&edge, &dir)).await;
+    let host = Host::start(PRODUCT, host_settings(&edge, &dir)).await;
     host.wait_ready().await;
     // Same anchor: the displaced view stays confirmed by the publisher.
     publisher.publish(&[Some(s0.clone()), Some(s1b.clone())], 1);
     host.wait_map(&publisher.head().sha256).await;
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0, &s1b], 6).await;
+    check_answers(&client, &[(0, &s0), (1, &s1b)], 6).await;
     // The displaced publication's session still answers (spec 11.6).
     let row = target_row(&s1, s1.entries[0].key());
-    let (_, body) = query_body(s1.session(), row);
+    let (_, body) = query_body(PRODUCT, s1.session(), row);
     let response = post_query(&host, body, "10.0.0.1").await;
     assert_eq!(response.status(), 200);
     assert_eq!(
@@ -173,11 +153,11 @@ async fn malformed_and_unknown_requests_are_refused() {
     let (dir, publisher, edge) = started(&[Some(s0.clone())]).await;
     let mut settings = host_settings(&edge, &dir);
     settings["admission"] = serde_json::json!({"upload_ms": 1000});
-    let host = Host::start(settings).await;
+    let host = Host::start(PRODUCT, settings).await;
     host.wait_ready().await;
     let map_sha = publisher.head().sha256;
     let row = target_row(&s0, s0.entries[0].key());
-    let (header, body) = query_body(s0.session(), row);
+    let (header, body) = query_body(PRODUCT, s0.session(), row);
 
     // A correct query answers with the echoed header.
     let ok = post_query(&host, body.clone(), "10.0.0.1").await;
@@ -305,7 +285,7 @@ async fn raw_request(host: &Host, headers: &str, body: &[u8]) -> String {
 async fn recovery_epoch_revokes_dropped_sessions() {
     let (s0, s1, s1b) = (scope0(), scope1(), scope1_rebuilt());
     let (dir, publisher, edge) = started(&[Some(s0.clone()), Some(s1.clone())]).await;
-    let host = Host::start(host_settings(&edge, &dir)).await;
+    let host = Host::start(PRODUCT, host_settings(&edge, &dir)).await;
     host.wait_ready().await;
     publisher.distribution.recover().unwrap();
     let committed = publisher.publish(&[Some(s0.clone()), Some(s1b.clone())], 9);
@@ -313,7 +293,7 @@ async fn recovery_epoch_revokes_dropped_sessions() {
     host.wait_map(&publisher.head().sha256).await;
 
     let row = target_row(&s1, s1.entries[0].key());
-    let (_, body) = query_body(s1.session(), row);
+    let (_, body) = query_body(PRODUCT, s1.session(), row);
     let revoked = error_body(post_query(&host, body, "10.0.0.1").await, 410).await;
     assert_eq!(revoked.code, ErrorCode::SessionUnavailable);
     error_body(
@@ -324,7 +304,7 @@ async fn recovery_epoch_revokes_dropped_sessions() {
     )
     .await;
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0, &s1b], 6).await;
+    check_answers(&client, &[(0, &s0), (1, &s1b)], 6).await;
     assert_eq!(
         host.metric("tachyon_tachygram_sessions_revoked_total")
             .await,
@@ -337,36 +317,19 @@ async fn recovery_epoch_revokes_dropped_sessions() {
     host.stop().await;
 }
 
-/// Wait until the host has failed at least `n` synchronization passes.
-async fn wait_failed_passes(host: &Host, n: u64) {
-    let started = std::time::Instant::now();
-    while host
-        .metric("tachyon_tachygram_sync_passes_total{result=\"failed\"}")
-        .await
-        .unwrap_or(0)
-        < n
-    {
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "no pass failed"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 async fn refused_publication_keeps_previous(bad: Arc<Fixture>) {
     let s0 = scope0();
     let (dir, publisher, edge) = started(&[Some(s0.clone())]).await;
-    let host = Host::start(host_settings(&edge, &dir)).await;
+    let host = Host::start(PRODUCT, host_settings(&edge, &dir)).await;
     host.wait_ready().await;
     let served = publisher.head().sha256;
     publisher.publish(&[Some(s0.clone()), Some(bad.clone())], 2);
-    wait_failed_passes(&host, 1).await;
+    host.wait_failed_passes(1).await;
     host.wait_map(&served).await;
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0], 8).await;
+    check_answers(&client, &[(0, &s0)], 8).await;
     let row = target_row(&bad, bad.entries[0].key());
-    let (_, body) = query_body(bad.session(), row);
+    let (_, body) = query_body(PRODUCT, bad.session(), row);
     error_body(post_query(&host, body, "10.0.0.1").await, 409).await;
     assert_eq!(host.ready_status().await, 200);
     host.stop().await;
@@ -376,7 +339,7 @@ async fn refused_publication_keeps_previous(bad: Arc<Fixture>) {
 /// row validation; the previous publication keeps serving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_row_refuses_the_publication() {
-    refused_publication_keeps_previous(corrupt_fixture(1, 2, 300)).await;
+    refused_publication_keeps_previous(corrupt_fixture(Spec::new(PRODUCT, 1, 2, 300))).await;
 }
 
 /// Scenario 10: a table whose published public setup is not the one its rows
@@ -384,7 +347,7 @@ async fn corrupt_row_refuses_the_publication() {
 /// serving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wrong_public_setup_refuses_the_publication() {
-    refused_publication_keeps_previous(wrong_public_fixture(1, 2, 300)).await;
+    refused_publication_keeps_previous(wrong_public_fixture(Spec::new(PRODUCT, 1, 2, 300))).await;
 }
 
 /// Scenario 13: refusals are 429 with `Retry-After: 1`, per client and for
@@ -396,10 +359,10 @@ async fn overload_refuses_with_retry_after_and_admitted_queries_complete() {
     let mut settings = host_settings(&edge, &dir);
     settings["admission"] =
         serde_json::json!({"executing": 1, "waiting": 0, "per_client": 1, "upload_ms": 10000});
-    let host = Host::start(settings).await;
+    let host = Host::start(PRODUCT, settings).await;
     host.wait_ready().await;
     let row = target_row(&s0, s0.entries[0].key());
-    let (_, body) = query_body(s0.session(), row);
+    let (_, body) = query_body(PRODUCT, s0.session(), row);
 
     // A client whose one slot is held by an upload in progress is refused.
     let mut socket = tokio::net::TcpStream::connect(host.public).await.unwrap();
@@ -465,7 +428,7 @@ async fn overload_refuses_with_retry_after_and_admitted_queries_complete() {
     assert!(refused > 0, "a burst over one permit is refused");
     // Every admitted query decodes to the right row.
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0], 4).await;
+    check_answers(&client, &[(0, &s0)], 4).await;
     host.stop().await;
 }
 
@@ -475,9 +438,9 @@ async fn overload_refuses_with_retry_after_and_admitted_queries_complete() {
 async fn unavailable_until_the_first_publication() {
     let s0 = scope0();
     let dir = tempdir();
-    let publisher = Publisher::start(&dir.path().join("publisher")).await;
+    let publisher = Publisher::start(PRODUCT, &dir.path().join("publisher")).await;
     let edge = Edge::start(publisher.addr).await;
-    let host = Host::start(host_settings(&edge, &dir)).await;
+    let host = Host::start(PRODUCT, host_settings(&edge, &dir)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(host.ready_status().await, 503);
     let body = error_body(reqwest::get(host.url("/map")).await.unwrap(), 503).await;
@@ -490,7 +453,7 @@ async fn unavailable_until_the_first_publication() {
     )
     .await;
     let row = target_row(&s0, s0.entries[0].key());
-    let (_, query) = query_body(s0.session(), row);
+    let (_, query) = query_body(PRODUCT, s0.session(), row);
     error_body(post_query(&host, query, "10.0.0.1").await, 503).await;
     error_body(
         reqwest::get(host.url(&format!("/public/{}", hex::encode(s0.session()))))
@@ -502,7 +465,7 @@ async fn unavailable_until_the_first_publication() {
     publisher.publish(&[Some(s0.clone())], 1);
     host.wait_ready().await;
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s0], 4).await;
+    check_answers(&client, &[(0, &s0)], 4).await;
     host.stop().await;
 }
 
@@ -514,7 +477,7 @@ async fn retain_scopes_sets_the_host_floor() {
     let (dir, publisher, edge) = started(&[Some(s0.clone()), Some(s1.clone())]).await;
     let mut settings = host_settings(&edge, &dir);
     settings["retain_scopes"] = 1.into();
-    let host = Host::start(settings).await;
+    let host = Host::start(PRODUCT, settings).await;
     host.wait_ready().await;
     let map = reqwest::get(host.url("/map")).await.unwrap();
     assert_eq!(map.headers()["x-floor-scope"], "1");
@@ -524,11 +487,11 @@ async fn retain_scopes_sets_the_host_floor() {
     );
     assert_eq!(host.metric("tachyon_tachygram_floor_scope").await, Some(1));
     let row = target_row(&s0, s0.entries[0].key());
-    let (_, body) = query_body(s0.session(), row);
+    let (_, body) = query_body(PRODUCT, s0.session(), row);
     let stale = error_body(post_query(&host, body, "10.0.0.1").await, 409).await;
     assert_eq!(stale.map_sha256.unwrap().hex(), publisher.head().sha256);
     let client = Client::new(&host.origin(), PRODUCT, None).unwrap();
-    check_answers(&client, &[&s1], 6).await;
+    check_answers(&client, &[(1, &s1)], 6).await;
     let map = client.current_map().unwrap();
     assert_eq!((map.host_floor_scope(), map.floor_scope()), (1, 1));
     let before = client.stats();
@@ -551,7 +514,7 @@ async fn retain_scopes_sets_the_host_floor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery_major_mismatch_refuses_to_start() {
     let dir = tempdir();
-    let publisher = Publisher::start(&dir.path().join("publisher")).await;
+    let publisher = Publisher::start(PRODUCT, &dir.path().join("publisher")).await;
     *publisher.discovery_version.lock().unwrap() = "999.0.0".into();
     let edge = Edge::start(publisher.addr).await;
     let host_dir = dir.path().join("host");

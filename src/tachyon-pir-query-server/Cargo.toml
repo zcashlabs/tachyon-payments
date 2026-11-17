@@ -14,9 +14,9 @@ path = "src/lib.rs"
 name = "tachyon-pir-query-server"
 path = "src/main.rs"
 
-# Products are selected independently (spec 4.2); the default is none. Only
-# `tachygram` has a serving module in milestone M1. A configuration section
-# for a product without a compiled serving module is refused at start-up.
+# Products are selected independently (spec 4.2); the default is none.
+# `registry` has no serving module yet. A configuration section for a product
+# without a compiled serving module is refused at start-up.
 [features]
 default = []
 memo = []
@@ -63,9 +63,19 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 zakura-pir-client = { workspace = true, features = ["native"] }
 
 [[test]]
-name = "serving"
-path = "tests/serving.rs"
+name = "tachygram"
+path = "tests/tachygram.rs"
 required-features = ["tachygram"]
+
+[[test]]
+name = "memo"
+path = "tests/memo.rs"
+required-features = ["memo"]
+
+[[test]]
+name = "first_contact"
+path = "tests/first_contact.rs"
+required-features = ["first-contact"]
 
 [[test]]
 name = "binary"

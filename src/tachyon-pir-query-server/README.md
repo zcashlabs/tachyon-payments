@@ -15,18 +15,29 @@ and on no chain, store, publisher or fixture crate.
 ## Products
 
 Cargo features `memo`, `first-contact`, `tachygram`, `registry`; default none
-(spec 4.2). Milestone M1 has one serving module, `tachygram`. A configuration
+(spec 4.2). Serving modules exist for `memo`, `first-contact` and `tachygram`;
+each feature compiles independently of the others (first-contact does not
+need memo: separate mounts, separate publications under
+`/provider/memo/v1/` and `/provider/first-contact/v1/`). A configuration
 section for a product without a compiled serving module is refused at
-start-up and by `--check`, enabled or not; the `memo`, `first-contact` and
-`registry` features reserve the names and compile no module yet.
+start-up and by `--check`, enabled or not; the `registry` feature reserves
+the name and compiles no module yet.
 
 Every product shares one serving core (`serving`, `prepare`, `sync`, `host`).
-A product module (`src/tachygram.rs`) is constants only: its configuration
+A product module (`src/memo.rs`, `src/first_contact.rs`,
+`src/tachygram.rs`) is constants only: its configuration
 section, Cargo feature, metric prefix, the four fixed endpoint labels, its
 default `retain_scopes` and its map family. The mounts, query magic, protocol
 string, entry layout and placement come from `tachyon_pir_protocol::Product`.
-Memo and first-contact are further `MapFamily::Chain` modules; the registry
-adds `MapFamily::Registry` (its `RegistryMapHead` in `map.rs`, its scope
+All three are `MapFamily::Chain`. What differs between them is handled by the
+protocol crate from the product constant: entry layout (memo 144 bytes, 56
+slots; first-contact 1,232 bytes, 6 slots; tachygram 40 bytes), key order
+(non-decreasing for memo and first-contact, whose tags may repeat, spec 5.3;
+strictly increasing for tachygram) and the height check (tachygram only).
+First-contact scopes are spans: the shared core uses the scope index (the
+span's position) for the listing, the inventory, the floor and
+`retain_scopes`, and the span's `scope_id` (its first epoch) for placement
+and session ids. The registry adds `MapFamily::Registry` (its `RegistryMapHead` in `map.rs`, its scope
 binding in `config.rs`) and a module.
 
 ## Usage
@@ -76,7 +87,7 @@ JSON; every object refuses unknown fields.
 | `role` | `combined` only (spec 4.1) |
 | `publisher_network`, `publisher_genesis` | Every map must state exactly these; the genesis also binds the distribution envelope's scope |
 | `activation_height`, `epoch_length` | Required for chain products; with the genesis they form the distribution scope (`ScopeBinding::chain`, spec 11.3) and every map must state them |
-| `retain_scopes` | At least 1; default 64 for tachygram (spec 11.5) |
+| `retain_scopes` | At least 1, counted in scope indices; default 64 for memo and tachygram, every span for first-contact (spec 11.5) |
 | `max_unconfirmed_seconds` | 1..=86400, default 600 (spec 11.6) |
 | `admission` | Defaults 2 executing, 8 waiting, 2,000 ms wait, 2 per client, 15,000 ms upload (spec 10.4, 10.6) |
 | `poll_ms` | Interval between successful synchronization passes, 10..=3,600,000, default 1,000 |
@@ -97,7 +108,7 @@ publication:
 
 1. The map head and every chunk are parsed and checked with the protocol
    crate's client checks (`ChainMapHead::validate`, `parse_chunk`,
-   `check_listing`); the head's `network`, `genesis_hash`,
+   `check_listing`) and must be canonically encoded (spec 10.3); the head's `network`, `genesis_hash`,
    `activation_height` and `epoch_length` must be the configured ones; its
    `generation` and `recovery_epoch` the inventory's; the authority subject
    must be the map's anchor and the last block of every open scope; the
@@ -124,8 +135,10 @@ Exit status 0.
 
 ## Public routes (spec 10.1, 10.2)
 
-Each product at its canonical and legacy mount (`/tachygram/v1`,
-`/v1/tachygram`), through `pir_control::public_routes::PublicMount`.
+Each product at its canonical and legacy mount (`/memo/v1` and `/v1/memo`,
+`/first-contact/v1` and `/v1/first-contact`, `/tachygram/v1` and
+`/v1/tachygram`), through `pir_control::public_routes::PublicMount`. Query
+magics `TMQ1`, `TFQ1`, `TGQ1`.
 
 | Route | Answer |
 |---|---|
@@ -158,11 +171,12 @@ overwrite those headers.
 
 | Route | Answer |
 |---|---|
-| `GET /health` | `{"ready", "identity", "products": {"tachygram": {"phase", "ready"}}}`, phases `running`, `stopping`, `stopped`, `failed` |
+| `GET /health` | `{"ready", "identity", "products": {"<product>": {"phase", "ready"}}}` keyed `memo`, `first-contact`, `tachygram`; phases `running`, `stopping`, `stopped`, `failed` |
 | `GET /ready` | The same body; 200 only when every enabled product is ready |
 | `GET /metrics` | Prometheus text: `pir_http_*{endpoint}` from `pir-observability` for the public routes, and the product metrics below |
 
-Product metrics, prefix `tachyon_<product>_`: `ready`, `anchor_height`,
+Product metrics, prefix `tachyon_memo_`, `tachyon_first_contact_` or
+`tachyon_tachygram_`: `ready`, `anchor_height`,
 `generation`, `recovery_epoch`, `floor_scope`, `newest_scope`,
 `entries_total`, `open_scope_entries` (of the served map), `tables_served`,
 `runtime_held_bytes`, `sessions_revoked_total`,
@@ -170,20 +184,20 @@ Product metrics, prefix `tachyon_<product>_`: `ready`, `anchor_height`,
 `upload_timeout`, `stale_routing`, `session_unavailable`,
 `temporarily_unavailable`, `overloaded`) and
 `sync_passes_total{result}` (`committed`, `deferred`, `failed`). Endpoint
-labels are fixed (`tachygram_map`, `tachygram_map_chunk`, `tachygram_public`,
-`tachygram_query`); no path segment, session id or client byte is a label.
+labels are fixed (`<product>_map`, `<product>_map_chunk`, `<product>_public`,
+`<product>_query`, with `first_contact` for first-contact); no path segment, session id or client byte is a label.
 
 ## Tests
 
-`cargo test -p tachyon-pir-query-server --profile release-fast --features tachygram`.
-`tests/support` publishes synthetic tachygram publications with real
+`cargo test -p tachyon-pir-query-server --profile release-fast --features memo,first-contact,tachygram`.
+`tests/support` publishes synthetic publications of any chain product with real
 `tachyon-4k8` tables (`tachyon-pir-table`'s scope builder) through a
 publisher-side `Distribution` behind an in-test TLS terminator; the host runs
 in-process on its own listeners, or as the built binary. Wallet requests come
 from the probe client (`tachyon-pir-cli`) or are built with
 `zakura-pir-client`; the oracle is the input entry list.
 
-- `serving`: cold bootstrap to ready and exact answers for hits and misses on
+- `tachygram`: cold bootstrap to ready and exact answers for hits and misses on
   both mounts; incremental publication with the displaced view still served;
   every refusal (400 magic, short, long, 413 declared and streamed, 408, 409
   with `map_sha256` on all three session routes, 404, 405); recovery-epoch
@@ -192,6 +206,16 @@ from the probe client (`tachyon-pir-cli`) or are built with
   queue, admitted answers correct); 503 before the first publication;
   `X-Floor-Scope` and 409 below the floor; refusal to start on a discovery
   major mismatch.
+- `memo`: cold bootstrap with a tag repeated past a row's 56 slots, all its
+  entries returned in ordinal order across the overflow segment (both
+  mounts); recovery revocation (410), unknown session (409), wrong magic
+  (400); a corrupt row refused.
+- `first_contact`: a sealed three-epoch span and an open span with their
+  heights, lookups by scope index and `scope_id`, a tag repeated past a
+  row's 6 slots across the overflow segment; `retain_scopes` and
+  `X-Floor-Scope` as scope indices; revocation (410 on `query` and
+  `public`); a corrupt row refused; with `memo` also compiled, both products
+  side by side in one host.
 - `binary`: `--check` exit codes; the binary bootstraps, answers and exits 0
   on SIGTERM with its ports released.
 - `config`: unknown fields, products not compiled in, role, listeners, paths

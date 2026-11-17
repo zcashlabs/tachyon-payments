@@ -1,7 +1,8 @@
 //! Real-HTTP(S) harness for the query host: a publisher-side `Distribution`
-//! publishing synthetic tachygram publications (real `tachyon-4k8` tables
-//! from `tachyon-pir-table`'s scope builder) on 127.0.0.1, a TLS terminator in
-//! front of it, and the query host in-process on its own listeners.
+//! publishing synthetic publications of any chain product (real
+//! `tachyon-4k8` tables from `tachyon-pir-table`'s scope builder) on
+//! 127.0.0.1, a TLS terminator in front of it, and the query host in-process
+//! on its own listeners.
 #![allow(dead_code)]
 
 use axum::{Router, http::header, routing};
@@ -11,29 +12,29 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+use tachyon_pir_cli::{Client, LookupOutcome, ScopeSelector};
 use tachyon_pir_distribution::{
     BlockRef, Committed, Contents, Distribution, DistributionOptions, Error, PublisherHooks,
     ScopeBinding, Subject, TableObjects, publisher::BoxFuture,
 };
 use tachyon_pir_protocol::{
-    BlockHash, Bytes32, ChainMapChunk, ChainMapHead, Entry, PROFILE, PirParams, Product,
-    QueryHeader, RecoveryEpoch, Scope, ScopeState, SealedChunkRef, Table, TachygramEntry,
-    map_sha256, query::encode_request,
+    BlockHash, Bytes32, ChainMapChunk, ChainMapHead, Entry, FirstContactEntry, KEM_CT_BYTES,
+    MEMO_CT_BYTES, MemoEntry, PROFILE, PirParams, Product, QueryHeader, RecoveryEpoch, Scope,
+    ScopeState, SealedChunkRef, Table, TachygramEntry, map_sha256, query::encode_request,
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 use zakura_pir_client::native::{P8, ProfileClientExt as _};
 
-pub const PRODUCT: Product = Product::Tachygram;
 pub const NETWORK: &str = "synthetic";
 pub const ACTIVATION: u32 = 8;
 pub const EPOCH: u32 = 16;
 /// The newest open scope is anchored this many blocks after its first block.
 pub const ANCHOR_OFFSET: u32 = 10;
-/// Entries of a scope fall in its first `ENTRY_SPAN` blocks.
+/// Tachygram entries of a scope fall in its first `ENTRY_SPAN` blocks.
 pub const ENTRY_SPAN: u32 = 10;
 
 pub fn genesis() -> BlockHash {
@@ -48,6 +49,7 @@ pub fn binding() -> ScopeBinding {
     )
 }
 
+/// The first block of the scope starting at epoch `scope_id`.
 pub fn first_height(scope_id: u64) -> u32 {
     ACTIVATION + scope_id as u32 * EPOCH
 }
@@ -69,28 +71,119 @@ fn digest(parts: &[&[u8]]) -> [u8; 32] {
     hash.finalize().into()
 }
 
-/// `count` distinct tachygram entries of scope `scope_id`, in ordinal order.
-pub fn entries(scope_id: u64, seed: u8, count: u32) -> Vec<Entry> {
-    let first = first_height(scope_id);
-    (0..count)
-        .map(|i| {
-            Entry::Tachygram(TachygramEntry {
-                tachygram: digest(&[
-                    b"tachygram",
-                    &[seed],
-                    &scope_id.to_le_bytes(),
-                    &i.to_le_bytes(),
-                ]),
-                blk_height: first + i % ENTRY_SPAN,
-                stamp_ordinal: i,
-            })
-        })
-        .collect()
+/// `N` bytes derived from `parts`.
+fn bytes<const N: usize>(parts: &[&[u8]]) -> [u8; N] {
+    let mut out = [0u8; N];
+    for (i, chunk) in out.chunks_mut(32).enumerate() {
+        let mut all: Vec<&[u8]> = parts.to_vec();
+        let counter = (i as u32).to_le_bytes();
+        all.push(&counter);
+        let block = digest(&all);
+        chunk.copy_from_slice(&block[..chunk.len()]);
+    }
+    out
 }
 
-/// A key no fixture holds.
-pub fn missing_key(i: u32) -> [u8; 32] {
-    digest(&[b"missing", &i.to_le_bytes()])
+/// One entry of `product` with the 32-byte `value` as its key (truncated to
+/// `key16` where the product stores that) and payload derived from `salt`.
+fn entry(product: Product, value: [u8; 32], salt: &[u8], height: u32, ordinal: u32) -> Entry {
+    let key16: [u8; 16] = value[..16].try_into().unwrap();
+    match product {
+        Product::Memo => Entry::Memo(MemoEntry {
+            key: key16,
+            ciphertext: bytes::<MEMO_CT_BYTES>(&[b"ct", salt]),
+        }),
+        Product::FirstContact => Entry::FirstContact(Box::new(FirstContactEntry {
+            key: key16,
+            kem_ciphertext: bytes::<KEM_CT_BYTES>(&[b"kem", salt]),
+            ciphertext: bytes::<MEMO_CT_BYTES>(&[b"ct", salt]),
+        })),
+        Product::Tachygram => Entry::Tachygram(TachygramEntry {
+            tachygram: value,
+            blk_height: height,
+            stamp_ordinal: ordinal,
+        }),
+        Product::Registry => unreachable!("registry is not a chain product"),
+    }
+}
+
+/// What a scope's fixture holds: `count` entries with distinct keys and, for
+/// products whose keys may repeat, `repeats` more entries sharing one key,
+/// spread through the ordinal order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Spec {
+    pub product: Product,
+    pub scope_id: u64,
+    pub seed: u8,
+    pub count: u32,
+    pub repeats: u32,
+}
+
+impl Spec {
+    pub const fn new(product: Product, scope_id: u64, seed: u8, count: u32) -> Self {
+        Self {
+            product,
+            scope_id,
+            seed,
+            count,
+            repeats: 0,
+        }
+    }
+
+    pub const fn repeating(self, repeats: u32) -> Self {
+        Self { repeats, ..self }
+    }
+
+    /// The key every repeated entry carries.
+    pub fn repeated_key(&self) -> Vec<u8> {
+        let value = digest(&[b"repeat", &[self.seed], &self.scope_id.to_le_bytes()]);
+        self.product.key_of(&value).to_vec()
+    }
+
+    /// The entries in ordinal order.
+    pub fn entries(&self) -> Vec<Entry> {
+        assert!(self.repeats == 0 || self.product != Product::Tachygram);
+        let first = first_height(self.scope_id);
+        let repeated = digest(&[b"repeat", &[self.seed], &self.scope_id.to_le_bytes()]);
+        let total = self.count + self.repeats;
+        let every = total
+            .checked_div(self.repeats)
+            .map_or(u32::MAX, |n| n.max(1));
+        let (mut unique, mut copies) = (0u32, 0u32);
+        (0..total)
+            .map(|ordinal| {
+                let salt = [
+                    &[self.seed][..],
+                    &self.scope_id.to_le_bytes(),
+                    &ordinal.to_le_bytes(),
+                ]
+                .concat();
+                let height = first + ordinal % ENTRY_SPAN;
+                let take_copy =
+                    copies < self.repeats && (ordinal % every == 0 || unique >= self.count);
+                if take_copy {
+                    copies += 1;
+                    entry(self.product, repeated, &salt, height, ordinal)
+                } else {
+                    unique += 1;
+                    let value = digest(&[
+                        b"entry",
+                        &[self.seed],
+                        &self.scope_id.to_le_bytes(),
+                        &unique.to_le_bytes(),
+                    ]);
+                    entry(self.product, value, &salt, height, ordinal)
+                }
+            })
+            .collect()
+    }
+}
+
+/// A key no fixture holds, as the product stores keys.
+pub fn missing_key(product: Product, i: u32) -> Vec<u8> {
+    product
+        .key_of(&digest(&[b"missing", &i.to_le_bytes()]))
+        .to_vec()
 }
 
 /// One published table: its map entry, rows and public setup.
@@ -103,6 +196,7 @@ pub struct PublishedTable {
 
 /// The tables of one scope and the entries they hold (the oracle).
 pub struct Fixture {
+    pub product: Product,
     pub scope_id: u64,
     pub entries: Vec<Entry>,
     pub n_buckets: u32,
@@ -110,34 +204,47 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// The session of the scope's first table.
     pub fn session(&self) -> [u8; 32] {
         self.tables[0].table.session_id.0
     }
     pub fn entry_count(&self) -> u64 {
         self.tables.iter().map(|t| t.table.entries).sum()
     }
+    /// Every entry with `key`, in ordinal order: what a lookup must return.
+    pub fn expected(&self, key: &[u8]) -> Vec<Entry> {
+        self.entries
+            .iter()
+            .filter(|e| e.key() == key)
+            .cloned()
+            .collect()
+    }
 }
 
-type Cache = Mutex<HashMap<(u64, u8, u32, u8), Arc<Fixture>>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Kind {
+    Plain,
+    CorruptRow,
+    WrongPublic,
+}
+
+type Cache = Mutex<HashMap<(Spec, Kind), Arc<Fixture>>>;
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
     CACHE.get_or_init(Cache::default)
 }
 
-/// Variants of a scope's tables.
-const PLAIN: u8 = 0;
-const CORRUPT_ROW: u8 = 1;
-const WRONG_PUBLIC: u8 = 2;
-
-fn build(scope_id: u64, seed: u8, count: u32) -> Fixture {
-    let entries = entries(scope_id, seed, count);
-    let built = tachyon_pir_table::build_scope(PRODUCT, &genesis(), scope_id, &entries).unwrap();
+fn build(spec: Spec) -> Fixture {
+    let entries = spec.entries();
+    let built =
+        tachyon_pir_table::build_scope(spec.product, &genesis(), spec.scope_id, &entries).unwrap();
     let tables = built
         .tables
         .iter()
         .map(|table| {
-            let described = tachyon_pir_table::describe(PRODUCT, scope_id, table).unwrap();
+            let described =
+                tachyon_pir_table::describe(spec.product, spec.scope_id, table).unwrap();
             PublishedTable {
                 table: described.table,
                 rows: Arc::new(table.rows.clone()),
@@ -146,71 +253,75 @@ fn build(scope_id: u64, seed: u8, count: u32) -> Fixture {
         })
         .collect();
     Fixture {
-        scope_id,
+        product: spec.product,
+        scope_id: spec.scope_id,
         entries,
         n_buckets: built.n_buckets,
         tables,
     }
 }
 
-/// A scope of `count` entries; built (about 1 s per table) once per process.
-pub fn fixture(scope_id: u64, seed: u8, count: u32) -> Arc<Fixture> {
-    variant(scope_id, seed, count, PLAIN)
+/// The scope's tables; built (about 1 s per table) once per process.
+pub fn fixture(spec: Spec) -> Arc<Fixture> {
+    variant(spec, Kind::Plain)
 }
 
-/// The scope with one row made non-canonical (two entries swapped out of key
-/// order), with digests, public setup and session id consistent with the bad
+/// The scope with a nonzero byte in the zero tail of row 0 of its first
+/// table, with digests, public setup and session id consistent with the bad
 /// rows, as a buggy publisher would publish it.
-pub fn corrupt_fixture(scope_id: u64, seed: u8, count: u32) -> Arc<Fixture> {
-    variant(scope_id, seed, count, CORRUPT_ROW)
+pub fn corrupt_fixture(spec: Spec) -> Arc<Fixture> {
+    variant(spec, Kind::CorruptRow)
 }
 
 /// The scope with another table's public setup named as its own (digest and
 /// session id recomputed), so only preparing the rows can tell.
-pub fn wrong_public_fixture(scope_id: u64, seed: u8, count: u32) -> Arc<Fixture> {
-    variant(scope_id, seed, count, WRONG_PUBLIC)
+pub fn wrong_public_fixture(spec: Spec) -> Arc<Fixture> {
+    variant(spec, Kind::WrongPublic)
 }
 
-fn variant(scope_id: u64, seed: u8, count: u32, kind: u8) -> Arc<Fixture> {
-    let key = (scope_id, seed, count, kind);
-    if let Some(found) = cache().lock().unwrap().get(&key) {
+fn variant(spec: Spec, kind: Kind) -> Arc<Fixture> {
+    if let Some(found) = cache().lock().unwrap().get(&(spec, kind)) {
         return found.clone();
     }
     let made = match kind {
-        PLAIN => build(scope_id, seed, count),
-        CORRUPT_ROW => corrupt(&variant(scope_id, seed, count, PLAIN)),
-        WRONG_PUBLIC => {
-            let plain = variant(scope_id, seed, count, PLAIN);
-            let other = variant(scope_id, seed.wrapping_add(100), count, PLAIN);
+        Kind::Plain => build(spec),
+        Kind::CorruptRow => corrupt(&variant(spec, Kind::Plain)),
+        Kind::WrongPublic => {
+            let plain = variant(spec, Kind::Plain);
+            let other = variant(
+                Spec {
+                    seed: spec.seed.wrapping_add(100),
+                    ..spec
+                },
+                Kind::Plain,
+            );
             let mut table = plain.tables[0].clone();
             table.public = other.tables[0].public.clone();
             table.table.public_sha256 = Bytes32(tachyon_pir_table::public_sha256(&table.public));
-            table.table.session_id = table.table.expected_session_id(PRODUCT, scope_id);
+            table.table.session_id = table.table.expected_session_id(spec.product, spec.scope_id);
             Fixture {
-                scope_id,
+                product: spec.product,
+                scope_id: spec.scope_id,
                 entries: plain.entries.clone(),
                 n_buckets: plain.n_buckets,
                 tables: vec![table],
             }
         }
-        _ => unreachable!(),
     };
     let made = Arc::new(made);
-    cache().lock().unwrap().entry(key).or_insert(made).clone()
+    cache()
+        .lock()
+        .unwrap()
+        .entry((spec, kind))
+        .or_insert(made)
+        .clone()
 }
 
 fn corrupt(plain: &Fixture) -> Fixture {
     let source = &plain.tables[0];
-    let entry = PRODUCT.entry_bytes();
     let mut rows = (*source.rows).clone();
-    // The first row holding two entries: swap them, breaking key order.
-    let row = rows
-        .chunks_exact(tachyon_pir_protocol::ROW_BYTES)
-        .position(|r| r[entry..2 * entry].iter().any(|b| *b != 0))
-        .expect("some row holds two entries");
-    let at = row * tachyon_pir_protocol::ROW_BYTES;
-    let (first, second) = rows[at..at + 2 * entry].split_at_mut(entry);
-    first.swap_with_slice(second);
+    // The last byte of row 0 lies past every product's last slot.
+    rows[tachyon_pir_protocol::ROW_BYTES - 1] = 1;
     let built = tachyon_pir_table::BuiltTable {
         bucket: source.table.bucket,
         segment: source.table.segment,
@@ -220,8 +331,9 @@ fn corrupt(plain: &Fixture) -> Fixture {
         rows_sha256: tachyon_pir_table::rows_sha256(&rows),
         rows,
     };
-    let described = tachyon_pir_table::describe(PRODUCT, plain.scope_id, &built).unwrap();
+    let described = tachyon_pir_table::describe(plain.product, plain.scope_id, &built).unwrap();
     Fixture {
+        product: plain.product,
         scope_id: plain.scope_id,
         entries: plain.entries.clone(),
         n_buckets: plain.n_buckets,
@@ -268,9 +380,37 @@ impl PublisherHooks for Hooks {
     }
 }
 
+/// One listed scope of a publication: where it starts (its first epoch, the
+/// `scope_id`), how many epochs it covers, and its tables (`None` for a
+/// scope without entries).
+#[derive(Clone)]
+pub struct Slot {
+    pub scope_id: u64,
+    pub epochs: u32,
+    pub fixture: Option<Arc<Fixture>>,
+}
+
+impl Slot {
+    pub fn epoch(scope_id: u64, fixture: Option<Arc<Fixture>>) -> Self {
+        Self {
+            scope_id,
+            epochs: 1,
+            fixture,
+        }
+    }
+    pub fn span(scope_id: u64, epochs: u32, fixture: Option<Arc<Fixture>>) -> Self {
+        Self {
+            scope_id,
+            epochs,
+            fixture,
+        }
+    }
+}
+
 /// The publisher side: a `Distribution` and the discovery document behind a
 /// plain HTTP listener.
 pub struct Publisher {
+    pub product: Product,
     pub distribution: Distribution,
     pub hooks: Arc<Hooks>,
     pub addr: SocketAddr,
@@ -285,11 +425,11 @@ impl Drop for Publisher {
 }
 
 impl Publisher {
-    pub async fn start(state_dir: &Path) -> Self {
+    pub async fn start(product: Product, state_dir: &Path) -> Self {
         let hooks = Arc::new(Hooks::default());
         let distribution = Distribution::open(
             state_dir,
-            tachyon_pir_distribution::Product::Tachygram,
+            tachyon_pir_distribution::Product::from_name(product.name()).unwrap(),
             binding(),
             hooks.clone(),
             DistributionOptions::default(),
@@ -319,6 +459,7 @@ impl Publisher {
             axum::serve(listener, app).await.unwrap();
         });
         Self {
+            product,
             distribution,
             hooks,
             addr,
@@ -327,13 +468,31 @@ impl Publisher {
         }
     }
 
-    /// Publish scopes `0..scopes.len()`: every scope but the newest sealed,
-    /// the newest open and anchored `ANCHOR_OFFSET` blocks into it. `None` is
-    /// a scope without entries. `fork` varies the block hashes, as a reorg.
+    /// Publish one-epoch scopes `0..scopes.len()` (see [`Publisher::publish_slots`]).
     pub fn publish(&self, scopes: &[Option<Arc<Fixture>>], fork: u8) -> Committed {
-        assert!(!scopes.is_empty() && scopes.len() <= 33);
-        let newest = scopes.len() as u64 - 1;
-        let anchor_height = first_height(newest) + ANCHOR_OFFSET;
+        let slots: Vec<Slot> = scopes
+            .iter()
+            .enumerate()
+            .map(|(i, f)| Slot::epoch(i as u64, f.clone()))
+            .collect();
+        self.publish_slots(&slots, fork)
+    }
+
+    /// Publish consecutive scopes: every scope but the newest sealed, the
+    /// newest open and anchored `ANCHOR_OFFSET` blocks into it. The scope
+    /// index is the position in `slots`. `fork` varies the block hashes, as
+    /// a reorg does.
+    pub fn publish_slots(&self, slots: &[Slot], fork: u8) -> Committed {
+        assert!(!slots.is_empty() && slots.len() <= 33);
+        assert_eq!(slots[0].scope_id, 0);
+        for pair in slots.windows(2) {
+            assert_eq!(
+                pair[1].scope_id,
+                pair[0].scope_id + u64::from(pair[0].epochs)
+            );
+        }
+        let newest = slots.len() as u64 - 1;
+        let anchor_height = first_height(slots[slots.len() - 1].scope_id) + ANCHOR_OFFSET;
         let anchor = block(anchor_height, fork);
         self.hooks
             .canonical
@@ -343,27 +502,26 @@ impl Publisher {
         let draft = self.distribution.begin().unwrap();
         let mut listed = Vec::new();
         let mut objects = Vec::new();
-        for (index, fixture) in scopes.iter().enumerate() {
-            let scope_id = index as u64;
-            let open = scope_id == newest;
-            let first = first_height(scope_id);
-            let (entries, n_buckets, tables) = match fixture {
+        for (index, slot) in slots.iter().enumerate() {
+            let open = index as u64 == newest;
+            let first = first_height(slot.scope_id);
+            let (entries, n_buckets, tables) = match &slot.fixture {
                 Some(f) => {
-                    assert_eq!(f.scope_id, scope_id);
+                    assert_eq!((f.product, f.scope_id), (self.product, slot.scope_id));
                     (f.entry_count(), f.n_buckets, f.tables.clone())
                 }
                 None => (0, 1, Vec::new()),
             };
             for table in &tables {
                 objects.push(TableObjects {
-                    scope_index: scope_id,
+                    scope_index: index as u64,
                     session_id: table.table.session_id.0,
                     rows: self.distribution.install(&table.rows).unwrap(),
                     public: self.distribution.install(&table.public).unwrap(),
                 });
             }
             listed.push(Scope {
-                scope_id,
+                scope_id: slot.scope_id,
                 state: if open {
                     ScopeState::Open
                 } else {
@@ -373,7 +531,7 @@ impl Publisher {
                 last_height: if open {
                     anchor_height
                 } else {
-                    first + EPOCH - 1
+                    first + slot.epochs * EPOCH - 1
                 },
                 entries,
                 n_buckets,
@@ -385,7 +543,7 @@ impl Publisher {
         let mut map_chunks = Vec::new();
         if !listed.is_empty() {
             let chunk = ChainMapChunk {
-                protocol: PRODUCT.protocol().into(),
+                protocol: self.product.protocol().into(),
                 base: 0,
                 scopes: listed,
             };
@@ -397,7 +555,7 @@ impl Publisher {
             map_chunks.push(self.distribution.install(&bytes).unwrap());
         }
         let head = ChainMapHead {
-            protocol: PRODUCT.protocol().into(),
+            protocol: self.product.protocol().into(),
             profile: PROFILE.into(),
             network: NETWORK.into(),
             genesis_hash: genesis(),
@@ -411,7 +569,7 @@ impl Publisher {
             sealed_chunks,
             open_scopes,
         };
-        head.validate(PRODUCT).unwrap();
+        head.validate(self.product).unwrap();
         let head = self
             .distribution
             .install(&head.to_bytes().unwrap())
@@ -503,6 +661,7 @@ impl Edge {
 
 /// The settings section of a host following `edge`, as JSON.
 pub fn settings(edge: &Edge, dir: &Path) -> serde_json::Value {
+    std::fs::create_dir_all(dir).unwrap();
     let ca = dir.join("publisher-ca.pem");
     std::fs::write(&ca, &edge.ca_pem).unwrap();
     serde_json::json!({
@@ -518,8 +677,19 @@ pub fn settings(edge: &Edge, dir: &Path) -> serde_json::Value {
     })
 }
 
+/// The configuration section name of `product`.
+pub fn section(product: Product) -> &'static str {
+    match product {
+        Product::Memo => "memo",
+        Product::FirstContact => "first_contact",
+        Product::Tachygram => "tachygram",
+        Product::Registry => "registry",
+    }
+}
+
 /// The query host, in-process on its own listeners.
 pub struct Host {
+    pub product: Product,
     pub public: SocketAddr,
     pub management: SocketAddr,
     stop: Shutdown,
@@ -527,19 +697,30 @@ pub struct Host {
 }
 
 impl Host {
-    /// Start a host with `settings` (see [`settings`]).
-    pub async fn start(settings: serde_json::Value) -> Self {
+    /// Start a host serving `product` with `settings` (see [`settings`]).
+    pub async fn start(product: Product, settings: serde_json::Value) -> Self {
+        Self::start_products(product, &[(product, settings)]).await
+    }
+
+    /// Start a host serving several products; `primary` is the one
+    /// [`Host::url`] addresses.
+    pub async fn start_products(
+        primary: Product,
+        products: &[(Product, serde_json::Value)],
+    ) -> Self {
         let management = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (management_addr, public_addr) = (
             management.local_addr().unwrap(),
             public.local_addr().unwrap(),
         );
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "management_listen": management_addr,
             "public_listen": public_addr,
-            "tachygram": {"enabled": true, "settings": settings},
         });
+        for (product, settings) in products {
+            config[section(*product)] = serde_json::json!({"enabled": true, "settings": settings});
+        }
         let config = tachyon_pir_query_server::Config::parse(config.to_string().as_bytes())
             .unwrap()
             .validate()
@@ -551,6 +732,7 @@ impl Host {
             stop.clone(),
         ));
         Self {
+            product: primary,
             public: public_addr,
             management: management_addr,
             stop,
@@ -559,11 +741,15 @@ impl Host {
     }
 
     pub fn url(&self, suffix: &str) -> String {
-        format!("http://{}{}{}", self.public, PRODUCT.mount(), suffix)
+        format!("http://{}{}{}", self.public, self.product.mount(), suffix)
     }
 
     pub fn origin(&self) -> String {
         format!("http://{}", self.public)
+    }
+
+    pub fn client(&self) -> Client {
+        Client::new(&self.origin(), self.product, None).unwrap()
     }
 
     pub async fn ready_status(&self) -> u16 {
@@ -622,6 +808,23 @@ impl Host {
         }
     }
 
+    /// Wait until the host has failed at least `n` synchronization passes of
+    /// its primary product.
+    pub async fn wait_failed_passes(&self, n: u64) {
+        let name = format!(
+            "tachyon_{}_sync_passes_total{{result=\"failed\"}}",
+            self.product.name().replace('-', "_")
+        );
+        let started = Instant::now();
+        while self.metric(&name).await.unwrap_or(0) < n {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "no pass failed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Request a stop and require a clean exit.
     pub async fn stop(mut self) {
         self.stop.request();
@@ -642,24 +845,42 @@ impl Drop for Host {
     }
 }
 
-/// PIR parameters of the published geometry, derived once.
-pub fn params() -> &'static PirParams {
-    static PARAMS: OnceLock<PirParams> = OnceLock::new();
-    PARAMS.get_or_init(|| PirParams::new(PRODUCT, tachyon_pir_protocol::PUBLISHED_GEOMETRY))
+/// PIR parameters of the published geometry, derived once per product.
+pub fn params(product: Product) -> Arc<PirParams> {
+    type Params = Mutex<HashMap<Product, Arc<PirParams>>>;
+    static PARAMS: OnceLock<Params> = OnceLock::new();
+    PARAMS
+        .get_or_init(Params::default)
+        .lock()
+        .unwrap()
+        .entry(product)
+        .or_insert_with(|| {
+            Arc::new(PirParams::new(
+                product,
+                tachyon_pir_protocol::PUBLISHED_GEOMETRY,
+            ))
+        })
+        .clone()
 }
 
-/// A real query body for `row` of session `session`, with its header.
-pub fn query_body(session: [u8; 32], row: u32) -> (QueryHeader, Vec<u8>) {
-    let p = params();
+/// A real query body of `product` for `row` of session `session`.
+pub fn query_body(product: Product, session: [u8; 32], row: u32) -> (QueryHeader, Vec<u8>) {
+    let p = params(product);
     let (_, upload) = P8
         .prepare(p.setup(), p.masks(), p.rows(), row as usize)
         .unwrap();
-    let header = QueryHeader::new(PRODUCT, session, [7; 16]);
+    let header = QueryHeader::new(product, session, [7; 16]);
     let body = encode_request(&header, &upload);
     (header, body)
 }
 
-/// POST a query body.
+/// A real query of the first table of `fixture` for the row of its first key.
+pub fn fixture_query(fixture: &Fixture) -> Vec<u8> {
+    let row = target_row(fixture, fixture.entries[0].key());
+    query_body(fixture.product, fixture.session(), row).1
+}
+
+/// POST a query body to the host's primary product.
 pub async fn post_query(host: &Host, body: Vec<u8>, client: &str) -> reqwest::Response {
     reqwest::Client::new()
         .post(host.url("/query"))
@@ -699,11 +920,11 @@ pub async fn error_body(
     body
 }
 
-/// The row context and session of `key` in `fixture`'s scope as `head` lists it.
+/// The row of `key` in the first table of `fixture`.
 pub fn target_row(fixture: &Fixture, key: &[u8]) -> u32 {
     let table = &fixture.tables[0].table;
     tachyon_pir_protocol::placement::row(
-        PRODUCT,
+        fixture.product,
         &genesis(),
         fixture.scope_id,
         table.seed,
@@ -713,10 +934,38 @@ pub fn target_row(fixture: &Fixture, key: &[u8]) -> u32 {
     .unwrap()
 }
 
-pub fn tempdir() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
+/// Look up `hits` distinct keys of each `(scope index, fixture)` and as many
+/// absent keys, and require exactly the oracle's answer: every entry of the
+/// key in ordinal order, or absent.
+pub async fn check_answers(client: &Client, scopes: &[(u64, &Fixture)], hits: usize) {
+    let map = client.fetch_map().await.unwrap();
+    for (index, fixture) in scopes {
+        let selector = ScopeSelector::Index(*index);
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for entry in &fixture.entries {
+            if !keys.iter().any(|k| k == entry.key()) {
+                keys.push(entry.key().to_vec());
+            }
+        }
+        let step = (keys.len() / hits).max(1);
+        for key in keys.iter().step_by(step).take(hits) {
+            match client.lookup(&map, selector, key).await.unwrap() {
+                LookupOutcome::Found { entries, .. } => {
+                    assert_eq!(entries, fixture.expected(key))
+                }
+                other => panic!("hit answered {other:?}"),
+            }
+        }
+        for i in 0..hits as u32 {
+            let key = missing_key(fixture.product, i);
+            match client.lookup(&map, selector, &key).await.unwrap() {
+                LookupOutcome::Absent { .. } => {}
+                other => panic!("miss answered {other:?}"),
+            }
+        }
+    }
 }
 
-pub fn path(dir: &tempfile::TempDir) -> PathBuf {
-    dir.path().to_path_buf()
+pub fn tempdir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
 }

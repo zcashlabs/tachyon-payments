@@ -91,6 +91,10 @@ pub const SECTIONS: [(&str, Product, &str); 4] = [
 
 /// The serving modules compiled into this build.
 pub const MODULES: &[&ProductModule] = &[
+    #[cfg(feature = "memo")]
+    &crate::memo::MODULE,
+    #[cfg(feature = "first-contact")]
+    &crate::first_contact::MODULE,
     #[cfg(feature = "tachygram")]
     &crate::tachygram::MODULE,
 ];

@@ -47,25 +47,59 @@ fn unknown_fields_are_refused_everywhere() {
     assert!(Config::parse(section.to_string().as_bytes()).is_err());
 }
 
+fn compiled(section: &str) -> bool {
+    (section == "memo" && cfg!(feature = "memo"))
+        || (section == "first_contact" && cfg!(feature = "first-contact"))
+        || (section == "tachygram" && cfg!(feature = "tachygram"))
+}
+
 #[test]
 fn a_section_for_a_product_not_compiled_in_is_refused() {
-    // No build of this milestone compiles memo, first-contact or registry.
-    for section in ["memo", "first_contact", "registry"] {
-        let error = validate(&config(section, settings())).unwrap_err();
-        assert!(error.contains("not compiled"), "{section}: {error}");
-        let mut disabled = config(section, settings());
+    // The registry has no serving module in this milestone.
+    for section in ["memo", "first_contact", "tachygram", "registry"] {
+        let mut s = settings();
+        s["state_dir"] = format!("/var/lib/tachyon-pir-query/{section}").into();
+        let enabled = validate(&config(section, s.clone()));
+        let mut disabled = config(section, s);
         disabled[section]["enabled"] = false.into();
-        let error = validate(&disabled).unwrap_err();
-        assert!(
-            error.contains("not compiled"),
-            "disabled {section}: {error}"
-        );
+        if compiled(section) {
+            let validated = enabled.unwrap();
+            assert_eq!(validated.products[0].module.section, section);
+        } else {
+            let error = enabled.unwrap_err();
+            assert!(error.contains("not compiled"), "{section}: {error}");
+            let error = validate(&disabled).unwrap_err();
+            assert!(
+                error.contains("not compiled"),
+                "disabled {section}: {error}"
+            );
+        }
     }
-    #[cfg(not(feature = "tachygram"))]
-    {
-        let error = validate(&config("tachygram", settings())).unwrap_err();
-        assert!(error.contains("not compiled"), "{error}");
-    }
+}
+
+#[cfg(all(feature = "memo", feature = "first-contact"))]
+#[test]
+fn memo_and_first_contact_are_separate_products() {
+    let mut value = config("memo", settings());
+    let mut fc = settings();
+    fc["state_dir"] = "/var/lib/tachyon-pir-query/first-contact".into();
+    value["first_contact"] = json!({"enabled": true, "settings": fc});
+    let validated = validate(&value).unwrap();
+    let sections: Vec<_> = validated
+        .products
+        .iter()
+        .map(|p| p.module.section)
+        .collect();
+    assert_eq!(sections, ["memo", "first_contact"]);
+    assert_eq!(validated.products[0].retain_scopes, Some(64));
+    assert_eq!(
+        validated.products[1].retain_scopes, None,
+        "first-contact keeps every span"
+    );
+    // One state directory cannot serve two products.
+    value["first_contact"]["settings"]["state_dir"] =
+        "/var/lib/tachyon-pir-query/tachygram/fc".into();
+    assert!(validate(&value).unwrap_err().contains("overlapping"));
 }
 
 #[cfg(feature = "tachygram")]

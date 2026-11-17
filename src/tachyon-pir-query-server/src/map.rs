@@ -92,6 +92,10 @@ fn read_chain(
     chunk_objects: &[(ObjectReference, Arc<[u8]>)],
 ) -> Result<Listing, Error> {
     let head = ChainMapHead::parse(head_bytes)?;
+    // Clients refuse a non-canonical map (spec 10.3); never serve one.
+    if head.to_bytes()? != head_bytes {
+        return Err("the map head is not canonically encoded".into());
+    }
     head.validate(product)?;
     if chunk_objects.len() != head.sealed_chunks.len() {
         return Err("the inventory's map chunks are not the head's sealed chunks".into());
@@ -103,7 +107,11 @@ fn read_chain(
         if object.sha256 != reference.sha256.hex() {
             return Err(format!("map chunk {position} is not the head's sealed chunk").into());
         }
-        chunks.push(head.parse_chunk(product, position, bytes)?);
+        let chunk = head.parse_chunk(product, position, bytes)?;
+        if chunk.to_bytes() != bytes[..] {
+            return Err(format!("map chunk {position} is not canonically encoded").into());
+        }
+        chunks.push(chunk);
     }
     head.check_listing(product, &chunks)?;
     let genesis = head.genesis_hash;

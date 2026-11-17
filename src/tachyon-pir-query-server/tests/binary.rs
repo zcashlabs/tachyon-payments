@@ -10,6 +10,9 @@ use std::{
 };
 use support::*;
 use tachyon_pir_cli::{Client, LookupOutcome, ScopeSelector};
+use tachyon_pir_protocol::Product;
+
+const PRODUCT: Product = Product::Tachygram;
 
 const BIN: &str = env!("CARGO_BIN_EXE_tachyon-pir-query-server");
 
@@ -68,10 +71,10 @@ fn check_validates_offline_and_exits_one_on_errors() {
     let (ok, stderr) = check(&write_config(dir.path(), &config));
     assert!(!ok && stderr.contains("combined"), "{stderr}");
     config["tachygram"]["settings"]["role"] = "combined".into();
-    config["memo"] = serde_json::json!({"enabled": false});
+    config["registry"] = serde_json::json!({"enabled": false});
     let (ok, stderr) = check(&write_config(dir.path(), &config));
     assert!(!ok && stderr.contains("not compiled"), "{stderr}");
-    config.as_object_mut().unwrap().remove("memo");
+    config.as_object_mut().unwrap().remove("registry");
     config["unknown"] = 1.into();
     let (ok, stderr) = check(&write_config(dir.path(), &config));
     assert!(!ok && stderr.contains("unknown field"), "{stderr}");
@@ -86,9 +89,9 @@ fn check_validates_offline_and_exits_one_on_errors() {
 /// drain on SIGTERM with exit status 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_binary_serves_and_stops_on_sigterm() {
-    let s0 = fixture(0, 1, 300);
+    let s0 = fixture(Spec::new(PRODUCT, 0, 1, 300));
     let dir = tempdir();
-    let publisher = Publisher::start(&dir.path().join("publisher")).await;
+    let publisher = Publisher::start(PRODUCT, &dir.path().join("publisher")).await;
     publisher.publish(&[Some(s0.clone())], 1);
     let edge = Edge::start(publisher.addr).await;
     let host_dir = dir.path().join("host");
@@ -132,7 +135,7 @@ async fn the_binary_serves_and_stops_on_sigterm() {
         }
     }
     match client
-        .lookup(&map, ScopeSelector::Index(0), &missing_key(0))
+        .lookup(&map, ScopeSelector::Index(0), &missing_key(PRODUCT, 0))
         .await
         .unwrap()
     {
