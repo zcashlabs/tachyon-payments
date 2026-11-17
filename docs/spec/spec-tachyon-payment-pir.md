@@ -292,12 +292,18 @@ tag        = 32 bytes
   40 bytes of payload and a 16-byte AEAD tag.
 - `KEM_CT_BYTES = 1088`. Provisional: ML-KEM-768.
 - The envelope MUST be consumed exactly; trailing bytes make it invalid.
+- A wallet-state `len` may be 0.
+- One envelope may carry the same tag more than once; every entry is kept
+  (section 5.3).
+- The longest valid envelope is 16 first-contact entries,
+  `MAX_ENVELOPE_BYTES = 19,989` bytes.
 
 ### 5.2 Ingestion rules
 
 The blob is attacker-controlled. Ingestion MUST treat it as data.
 
-- An empty memo is skipped.
+- An empty memo is skipped; it is not an envelope and is not counted as
+  invalid. A nonempty memo shorter than 5 bytes is invalid.
 - A memo that does not parse as a valid envelope is skipped whole and counted
   (`tachyon_memo_envelopes_invalid_total`). It MUST NOT fail ingestion.
 - Kind `0x01` entries go to the memo database; kind `0x02` to first-contact.
@@ -349,7 +355,9 @@ A row holds `SLOTS = floor(8192 / ENTRY_BYTES)` fixed-size entries.
 - Remaining slots and the row tail are zero. An all-zero entry is empty; no
   valid entry is all zero, because every entry begins with a nonzero key.
   A key of all zero bytes is rejected at ingestion: in memo and first-contact
-  an entry whose `key16` is all zero makes its envelope invalid (section 5.2);
+  an entry of kind `0x01` or `0x02` whose `key16` (the first 16 bytes of its
+  tag) is all zero makes its envelope invalid (section 5.2); the tag of a kind
+  `0x03` entry, which builds no index, is not checked;
   in tachygram an all-zero tachygram is an integrity fault handled like a
   duplicate (section 8.3); in registry the registration is refused
   (section 9.3).
@@ -1368,6 +1376,7 @@ until wallets publish envelopes.
 | `KEM_EK_BYTES` | 1,184 | Provisional (D1) |
 | `MAX_ENVELOPE_ENTRIES` | 16 | Provisional (D1) |
 | `MAX_STATE_BYTES` | 1,024 | Provisional (D1) |
+| `MAX_ENVELOPE_BYTES` | 19,989 | Follows from section 5.1 |
 | `MAX_BUCKETS` | 64 | From `wallet-pir` txid |
 | `MAX_SEEDS` | 64 | From `wallet-pir` txid |
 | `MAX_SEGMENTS` | 8 | This spec's own (matches Receiver's shard-segment limit) |
