@@ -311,7 +311,9 @@ The blob is attacker-controlled. Ingestion MUST treat it as data.
 - Unknown kinds make the envelope invalid.
 - Entries are ordered by `(height, tx index in block, entry index)`. This
   order is the entry's **ordinal** and is used wherever entries must be sorted
-  deterministically.
+  deterministically. The tx index is the transaction's position in the block's
+  `tx` list, the coinbase being 0 (section 11.1); the entry index counts every
+  entry of the envelope, of all kinds.
 
 ### 5.3 Duplicate tags
 
@@ -540,8 +542,9 @@ CPU only.
     table at target load), or
   - it covers `FC_SPAN_MAX_EPOCHS = 64` epochs.
 - `n_buckets` follows section 6.3 for every span. A span that closes by count
-  holds between 3,072 and 3,071 plus its last epoch's entries, so it usually
-  has one bucket; a span whose last epoch is large has more.
+  holds at least 3,072 entries and fewer than 3,072 plus its last epoch's
+  entries, so it usually has one bucket; a span whose last epoch is large has
+  more.
 - The span seals `SEAL_DEPTH` blocks after its last block.
 - Readers (query hosts, clients) can check only a span's shape: whole
   consecutive epochs, at most `FC_SPAN_MAX_EPOCHS`. The closing rule depends on
