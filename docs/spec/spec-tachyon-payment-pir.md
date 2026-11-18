@@ -545,6 +545,11 @@ CPU only.
   holds at least 3,072 entries and fewer than 3,072 plus its last epoch's
   entries, so it usually has one bucket; a span whose last epoch is large has
   more.
+- The open span begins at the epoch after the last boundary (epoch 0 for
+  span 0) and exists once a block of that epoch is stored. A boundary is
+  decided by appending an epoch's last block and is removed by any rewind
+  below that block. "Covers 64 epochs" means the span reaches 64 epochs at
+  that boundary.
 - The span seals `SEAL_DEPTH` blocks after its last block.
 - Readers (query hosts, clients) can check only a span's shape: whole
   consecutive epochs, at most `FC_SPAN_MAX_EPOCHS`. The closing rule depends on
@@ -564,7 +569,7 @@ Store::open(path, binding) -> Result<Store>
 Store::append(block: &IndexedBlock) -> Result<()>
 Store::rewind(keep: Option<&BlockId>) -> Result<()>
 Store::checkpoint_at_or_below(height) -> Result<Option<BlockId>>
-Store::entries(kind, scope) -> Result<impl Iterator<Item = Entry>>
+Store::entries(kind, scope_id) -> Result<impl Iterator<Item = Record>>
 Store::spans() -> Result<Vec<Span>>
 ```
 
@@ -572,9 +577,12 @@ Store::spans() -> Result<Vec<Span>>
 ordinals. `append` is atomic per block. `rewind` removes every block above
 `keep`, or every block when `keep` is `None`, matching the `Ingestion` trait's
 `rewind`, and any span boundary decided by them. Reads return `Result`: an
-SQL error read as "no checkpoint" would rewind everything. The `binding`
-records the network identity and epoch length; reopening a journal under a
-different binding is refused.
+SQL error read as "no checkpoint" would rewind everything. Each `Record`
+carries its ordinal, its full tag and its table entry; for first-contact
+`scope_id` is the span's first epoch. The `binding` records the network
+identity, the epoch length and, for `memo-store`, `FC_SPAN_TARGET` and
+`FC_SPAN_MAX_EPOCHS` (stored span boundaries depend on them); reopening a
+journal under a different binding is refused.
 
 Every journal starts at the activation height. Ordinals, and the stamp
 ordinals of section 8.1, are canonical only for a scope stored from its first
@@ -1235,7 +1243,8 @@ Both binaries accept `--config FILE` and `--check` (validate offline).
   and segments in it, not events); `publication_seconds` is a histogram from
   build to commit; `sessions_revoked_total` is a counter of sessions in scopes
   reached by a sealed-scope rewind.
-- Memo adds `envelopes_invalid_total` and `state_entries_total`.
+- Memo adds `envelopes_invalid_total` and `state_entries_total`, gauges over
+  the journal's stored blocks (they fall on a rewind).
 - Registry adds `registrations_total{result}` and `pow_rejected_total`.
 
 ## 12. Trust and privacy
