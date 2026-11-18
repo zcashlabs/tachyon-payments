@@ -32,6 +32,11 @@ pub struct MemoSettings {
 #[serde(deny_unknown_fields)]
 pub struct FirstContactSettings {}
 
+/// The shortest epoch a network may have: an epoch stays open `SEAL_DEPTH`
+/// (100) blocks after it ends, and a chain subject names at most
+/// `MAX_OPEN_SCOPES` (64) open-scope blocks (spec 11.3).
+pub const MIN_EPOCH_LENGTH: u32 = 2;
+
 /// Everything the memo publisher needs besides the root chain settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoConfig {
@@ -73,9 +78,9 @@ impl MemoConfig {
     }
 
     /// Checks what can be checked without touching the filesystem or the
-    /// network: an absolute state directory, a fixed port and a nonzero epoch
-    /// length. The host additionally requires a private listener and state
-    /// directories disjoint from other products'.
+    /// network: an absolute state directory, a fixed port and an epoch length
+    /// of at least [`MIN_EPOCH_LENGTH`]. The host additionally requires a
+    /// private listener and state directories disjoint from other products'.
     pub fn validate(&self) -> Result<(), String> {
         if !self.state_dir.is_absolute() {
             return Err(format!(
@@ -86,8 +91,11 @@ impl MemoConfig {
         if self.listen.port() == 0 {
             return Err("memo listen needs a fixed port".into());
         }
-        if self.epoch_length == 0 {
-            return Err("chain epoch_length must be at least one block".into());
+        if self.epoch_length < MIN_EPOCH_LENGTH {
+            return Err(format!(
+                "chain epoch_length {} must be at least {MIN_EPOCH_LENGTH} (spec 11.3)",
+                self.epoch_length
+            ));
         }
         Ok(())
     }
@@ -138,5 +146,22 @@ mod tests {
         );
         assert!(ephemeral.validate().is_err());
         assert!(MemoConfig::new(settings, 0).validate().is_err());
+    }
+
+    #[test]
+    fn validate_requires_epoch_length_of_at_least_two() {
+        let settings = || MemoSettings {
+            listen: "127.0.0.1:9401".parse().unwrap(),
+            state_dir: "/var/lib/tachyon-pir/memo".into(),
+        };
+        for refused in [0, 1] {
+            let error = MemoConfig::new(settings(), refused).validate().unwrap_err();
+            assert!(error.contains("spec 11.3"), "{error}");
+        }
+        assert_eq!(
+            MemoConfig::new(settings(), MIN_EPOCH_LENGTH).validate(),
+            Ok(())
+        );
+        assert_eq!(MIN_EPOCH_LENGTH, 2);
     }
 }
