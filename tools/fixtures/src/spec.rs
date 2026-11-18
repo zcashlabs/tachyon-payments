@@ -4,6 +4,7 @@
 //! A spec is replayed through the same builder calls a test would make, so a test
 //! process that builds [`ChainSpec::build`] itself (and applies the same control
 //! edits) holds the same chain the binary serves, hashes included.
+use crate::envelope::{AuthoredEnvelope, EnvelopeJson, EnvelopeMix, Malformation};
 use crate::model::{
     BlockSpec, ChainConfig, DEFAULT_FEE_ZAT, FixtureError, SyntheticChain, TxMix, TxSpec,
 };
@@ -22,6 +23,9 @@ pub struct ChainSpec {
     pub genesis_time: Option<u64>,
     pub block_interval: Option<u64>,
     pub mix: TxMix,
+    /// Random envelopes in generated blocks (and in random blocks appended
+    /// through the control endpoints); replaces the mix's random memos.
+    pub envelopes: Option<EnvelopeMix>,
     pub random_blocks: u64,
     pub explicit_blocks: Vec<BlockJson>,
 }
@@ -39,6 +43,7 @@ impl Default for ChainSpec {
             genesis_time: None,
             block_interval: None,
             mix: TxMix::default(),
+            envelopes: None,
             random_blocks: 0,
             explicit_blocks: Vec::new(),
         }
@@ -56,11 +61,15 @@ impl ChainSpec {
             genesis_time: self.genesis_time.unwrap_or(defaults.genesis_time),
             block_interval: self.block_interval.unwrap_or(defaults.block_interval),
             mix: self.mix.clone(),
+            envelopes: self.envelopes.clone(),
         }
     }
 
     /// The chain this spec describes.
     pub fn build(&self) -> Result<SyntheticChain, FixtureError> {
+        if let Some(mix) = &self.envelopes {
+            mix.check()?;
+        }
         let blocks = to_specs(&self.explicit_blocks)?;
         let mut chain = SyntheticChain::new(self.config());
         chain.append_random(self.random_blocks);
@@ -84,14 +93,22 @@ pub struct BlockJson {
     pub time: Option<u64>,
 }
 
-/// A Tachyon transaction in JSON.
+/// A Tachyon transaction in JSON. At most one of `memo_hex`, `envelope` and
+/// `malformed` may be given.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TxJson {
     /// Own actions, with random filler values.
     pub actions: u32,
-    /// The memo bytes as hex.
+    /// The memo bytes as hex (raw, unclassified bytes in the ground truth).
     pub memo_hex: String,
+    /// A valid envelope as the memo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<EnvelopeJson>,
+    /// An envelope malformed this way as the memo, drawn from the chain's
+    /// stream (so an in-process build of the spec draws the same bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub malformed: Option<Malformation>,
     pub stamp: StampJson,
     pub fee_zat: u64,
     pub value_balance_zat: i64,
@@ -102,6 +119,8 @@ impl Default for TxJson {
         Self {
             actions: 1,
             memo_hex: String::new(),
+            envelope: None,
+            malformed: None,
             stamp: StampJson::Pointer,
             fee_zat: DEFAULT_FEE_ZAT,
             value_balance_zat: 0,
@@ -136,13 +155,44 @@ impl BlockJson {
 }
 
 impl TxJson {
+    /// A one-action pointer-stamp transaction carrying `envelope`.
+    pub fn with_envelope(envelope: &AuthoredEnvelope) -> Self {
+        Self {
+            envelope: Some(envelope.into()),
+            ..Self::default()
+        }
+    }
+
+    /// A one-action pointer-stamp transaction carrying an envelope malformed as
+    /// `malformation`.
+    pub fn with_malformed(malformation: Malformation) -> Self {
+        Self {
+            malformed: Some(malformation),
+            ..Self::default()
+        }
+    }
+
     pub fn to_spec(&self) -> Result<TxSpec, FixtureError> {
         let memo = hex::decode(&self.memo_hex)
             .map_err(|error| FixtureError::Spec(format!("memo_hex: {error}")))?;
-        let tx = TxSpec::tachyon(self.actions)
+        let given = usize::from(!memo.is_empty())
+            + usize::from(self.envelope.is_some())
+            + usize::from(self.malformed.is_some());
+        if given > 1 {
+            return Err(FixtureError::Spec(
+                "give at most one of memo_hex, envelope and malformed".to_owned(),
+            ));
+        }
+        let mut tx = TxSpec::tachyon(self.actions)
             .memo(memo)
             .fee(self.fee_zat)
             .value_balance(self.value_balance_zat);
+        if let Some(envelope) = &self.envelope {
+            tx = tx.envelope(&envelope.to_envelope()?);
+        }
+        if let Some(malformation) = self.malformed {
+            tx = tx.malformed_memo(malformation);
+        }
         Ok(match &self.stamp {
             StampJson::Pointer => tx.pointer(),
             StampJson::RandomProof { count } => tx.random_proof(*count),

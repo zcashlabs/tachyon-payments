@@ -923,6 +923,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "memo-publisher"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "hex",
+ "memo-store",
+ "pir-observability",
+ "pir-pipeline",
+ "pir-publication",
+ "pir-publisher",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tachyon-chain",
+ "tachyon-fixtures",
+ "tachyon-pir-distribution",
+ "tachyon-pir-protocol",
+ "tachyon-pir-table",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "memo-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rusqlite",
+ "tachyon-chain",
+ "tachyon-fixtures",
+ "tachyon-pir-protocol",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,6 +1875,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tachyon-pir-protocol",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

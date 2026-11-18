@@ -5,10 +5,15 @@
 //! rendered from these values (see [`crate::json`]) and never parsed back, so a
 //! test comparing a decoder's output with these accessors compares against an
 //! independent oracle.
+use crate::envelope::{
+    AuthoredEnvelope, AuthoredMemo, EnvelopeCounts, EnvelopeMix, FirstContactTruth, FollowUpTruth,
+    Malformation, MalformedMemo, MemoSpec, TagPool, draw_memo,
+};
 use crate::hash::{Hash32, display, merkle_root, sha256d};
 use crate::rng::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeBounds;
 
 /// The NuTachyon activation height of the alpha testnet (spec section 3).
 pub const DEFAULT_ACTIVATION_HEIGHT: u64 = 8;
@@ -136,11 +141,24 @@ pub struct Tx {
     bytes: Vec<u8>,
     txid: Hash32,
     auth_digest: Hash32,
+    /// How the Tachyon memo was authored; [`AuthoredMemo::Empty`] for a
+    /// coinbase. Not part of the bytes: the txid commits to the memo bytes only.
+    authored_memo: AuthoredMemo,
 }
 
 impl Tx {
-    /// The transaction with `body` expiring at `expiry_height`.
+    /// The transaction with `body` expiring at `expiry_height`. Its memo, if
+    /// any, is recorded as [`AuthoredMemo::Raw`] (unclassified).
     pub fn new(body: TxBody, expiry_height: u64) -> Self {
+        let authored_memo = match &body {
+            TxBody::Tachyon(bundle) => AuthoredMemo::from_bytes(bundle.memo.clone()),
+            TxBody::Coinbase(_) => AuthoredMemo::Empty,
+        };
+        Self::with_authored_memo(body, expiry_height, authored_memo)
+    }
+
+    /// `body`'s memo bytes must be `authored_memo.to_bytes()`.
+    fn with_authored_memo(body: TxBody, expiry_height: u64, authored_memo: AuthoredMemo) -> Self {
         let bytes = encode_tx(&body, expiry_height);
         let txid = sha256d(&[b"txid", &bytes]);
         let auth_digest = sha256d(&[b"auth", &bytes]);
@@ -150,7 +168,14 @@ impl Tx {
             bytes,
             txid,
             auth_digest,
+            authored_memo,
         }
+    }
+
+    /// The Tachyon memo as authored (envelope, malformed bytes and their
+    /// malformation, raw bytes or empty); `None` for a coinbase.
+    pub fn authored_memo(&self) -> Option<&AuthoredMemo> {
+        self.tachyon().map(|_| &self.authored_memo)
     }
 
     /// The transaction id in protocol order.
@@ -288,6 +313,8 @@ pub struct TachyonTxTruth<'a> {
     pub txid: Hash32,
     pub own_actions: u32,
     pub memo: &'a [u8],
+    /// The memo as authored: the envelope oracle's source.
+    pub authored_memo: &'a AuthoredMemo,
     pub stamp: &'a Stamp,
 }
 
@@ -360,6 +387,7 @@ impl Block {
                 txid: tx.txid(),
                 own_actions: bundle.actions.len() as u32,
                 memo: &bundle.memo,
+                authored_memo: &tx.authored_memo,
                 stamp: &bundle.stamp,
             })
         })
@@ -372,6 +400,68 @@ impl Block {
             .filter_map(Tx::stamp)
             .flat_map(|stamp| stamp.tachygrams().iter().copied())
             .collect()
+    }
+
+    /// Every follow-up entry of the block's valid envelopes as authored, in
+    /// ordinal order `(height, tx index, entry index)` (spec 5.2).
+    pub fn follow_ups(&self) -> Vec<FollowUpTruth> {
+        let mut out = Vec::new();
+        for tx in self.tachyon_txs() {
+            let Some(envelope) = tx.authored_memo.envelope() else {
+                continue;
+            };
+            for (entry_index, entry) in envelope.entries.iter().enumerate() {
+                if let crate::envelope::AuthoredEntry::FollowUp { tag, ciphertext } = entry {
+                    out.push(FollowUpTruth {
+                        height: self.height,
+                        tx_index: tx.index,
+                        entry_index,
+                        tag: *tag,
+                        ciphertext: *ciphertext,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Every first-contact entry of the block's valid envelopes as authored, in
+    /// ordinal order.
+    pub fn first_contacts(&self) -> Vec<FirstContactTruth> {
+        let mut out = Vec::new();
+        for tx in self.tachyon_txs() {
+            let Some(envelope) = tx.authored_memo.envelope() else {
+                continue;
+            };
+            for (entry_index, entry) in envelope.entries.iter().enumerate() {
+                if let crate::envelope::AuthoredEntry::FirstContact {
+                    tag,
+                    kem_ciphertext,
+                    ciphertext,
+                } = entry
+                {
+                    out.push(FirstContactTruth {
+                        height: self.height,
+                        tx_index: tx.index,
+                        entry_index,
+                        tag: *tag,
+                        kem_ciphertext: *kem_ciphertext,
+                        ciphertext: *ciphertext,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The block's empty memos, valid and malformed envelopes, raw memos and
+    /// entries per kind, as authored.
+    pub fn envelope_counts(&self) -> EnvelopeCounts {
+        let mut counts = EnvelopeCounts::default();
+        for tx in self.tachyon_txs() {
+            counts.add_memo(tx.authored_memo);
+        }
+        counts
     }
 
     /// The synthetic header bytes the hash commits to.
@@ -464,7 +554,8 @@ pub enum StampSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxSpec {
     pub actions: ActionsSpec,
-    pub memo: Vec<u8>,
+    /// The memo: bytes, an authored envelope, or a malformation.
+    pub memo: MemoSpec,
     pub stamp: StampSpec,
     /// The stamp fee, unless the stamp is [`StampSpec::Exact`].
     pub fee_zat: u64,
@@ -481,7 +572,7 @@ impl TxSpec {
     pub fn tachyon(actions: u32) -> Self {
         Self {
             actions: ActionsSpec::Random(actions),
-            memo: Vec::new(),
+            memo: MemoSpec::default(),
             stamp: StampSpec::Pointer,
             fee_zat: DEFAULT_FEE_ZAT,
             value_balance_zat: 0,
@@ -491,9 +582,34 @@ impl TxSpec {
         }
     }
 
-    /// With this memo.
+    /// With this memo, recorded as raw (unclassified) bytes.
     pub fn memo(mut self, memo: impl Into<Vec<u8>>) -> Self {
-        self.memo = memo.into();
+        self.memo = MemoSpec::Authored(AuthoredMemo::from_bytes(memo.into()));
+        self
+    }
+
+    /// With `envelope` as the memo (its spec 5.1 encoding). Panics if the
+    /// envelope is not valid: author invalid ones with
+    /// [`Self::malformed_memo`], so the ground truth never calls an invalid
+    /// envelope valid.
+    pub fn envelope(mut self, envelope: &AuthoredEnvelope) -> Self {
+        if let Err(error) = envelope.check() {
+            panic!("TxSpec::envelope: {error}; use malformed_memo for invalid envelopes");
+        }
+        self.memo = MemoSpec::Authored(AuthoredMemo::Envelope(envelope.clone()));
+        self
+    }
+
+    /// With an envelope malformed as `malformation`, drawn from the chain's
+    /// stream when the transaction is built.
+    pub fn malformed_memo(mut self, malformation: Malformation) -> Self {
+        self.memo = MemoSpec::Malformed(malformation);
+        self
+    }
+
+    /// With these already drawn malformed bytes.
+    pub fn malformed_bytes(mut self, malformed: MalformedMemo) -> Self {
+        self.memo = MemoSpec::Authored(AuthoredMemo::Malformed(malformed));
         self
     }
 
@@ -548,7 +664,7 @@ impl TxSpec {
         let bundle = tx.tachyon()?;
         Some(Self {
             actions: ActionsSpec::Explicit(bundle.actions.clone()),
-            memo: bundle.memo.clone(),
+            memo: MemoSpec::Authored(tx.authored_memo.clone()),
             stamp: StampSpec::Exact(bundle.stamp.clone()),
             fee_zat: bundle.stamp.fee_zat(),
             value_balance_zat: bundle.value_balance_zat,
@@ -576,6 +692,15 @@ impl BlockSpec {
     /// With `tx` appended.
     pub fn tx(mut self, tx: TxSpec) -> Self {
         self.txs.push(tx);
+        self
+    }
+
+    /// With one Tachyon transaction (one action, pointer stamp) per envelope
+    /// appended, in order.
+    pub fn envelopes(mut self, envelopes: &[AuthoredEnvelope]) -> Self {
+        for envelope in envelopes {
+            self.txs.push(TxSpec::tachyon(1).envelope(envelope));
+        }
         self
     }
 
@@ -635,6 +760,9 @@ pub struct ChainConfig {
     pub genesis_time: u64,
     pub block_interval: u64,
     pub mix: TxMix,
+    /// Random envelopes for generated blocks. `None` (the default): generated
+    /// memos are the mix's random bytes, as before envelopes existed.
+    pub envelopes: Option<EnvelopeMix>,
 }
 
 impl Default for ChainConfig {
@@ -646,6 +774,7 @@ impl Default for ChainConfig {
             genesis_time: DEFAULT_GENESIS_TIME,
             block_interval: DEFAULT_BLOCK_INTERVAL,
             mix: TxMix::default(),
+            envelopes: None,
         }
     }
 }
@@ -692,11 +821,19 @@ pub struct SyntheticChain {
     generation: u64,
     /// Every tachygram authored so far, on any branch.
     used_tachygrams: HashSet<[u8; 32]>,
+    /// Envelope tags drawn or authored so far, per kind, on any branch.
+    tags: TagPool,
 }
 
 impl SyntheticChain {
-    /// A chain holding only its genesis block.
+    /// A chain holding only its genesis block. Panics on an invalid
+    /// [`ChainConfig::envelopes`] mix ([`EnvelopeMix::check`]).
     pub fn new(config: ChainConfig) -> Self {
+        if let Some(mix) = &config.envelopes
+            && let Err(error) = mix.check()
+        {
+            panic!("{error}");
+        }
         let rng = Rng::new("chain", config.seed);
         let mut chain = Self {
             config,
@@ -706,6 +843,7 @@ impl SyntheticChain {
             stale: HashMap::new(),
             generation: 0,
             used_tachygrams: HashSet::new(),
+            tags: TagPool::default(),
         };
         chain.push(BlockSpec::new());
         chain
@@ -789,6 +927,77 @@ impl SyntheticChain {
         self.blocks.iter().flat_map(Block::tachygrams).collect()
     }
 
+    /// Every follow-up entry of the active chain's valid envelopes at heights in
+    /// `heights`, as authored, in ordinal order (spec 5.2).
+    pub fn follow_ups(&self, heights: impl RangeBounds<u64>) -> Vec<FollowUpTruth> {
+        self.blocks
+            .iter()
+            .filter(|block| heights.contains(&block.height))
+            .flat_map(Block::follow_ups)
+            .collect()
+    }
+
+    /// Every first-contact entry of the active chain's valid envelopes at
+    /// heights in `heights`, as authored, in ordinal order.
+    pub fn first_contacts(&self, heights: impl RangeBounds<u64>) -> Vec<FirstContactTruth> {
+        self.blocks
+            .iter()
+            .filter(|block| heights.contains(&block.height))
+            .flat_map(Block::first_contacts)
+            .collect()
+    }
+
+    /// [`Block::envelope_counts`] summed over the active blocks in `heights`.
+    pub fn envelope_counts(&self, heights: impl RangeBounds<u64>) -> EnvelopeCounts {
+        let mut counts = EnvelopeCounts::default();
+        for block in self
+            .blocks
+            .iter()
+            .filter(|block| heights.contains(&block.height))
+        {
+            counts += block.envelope_counts();
+        }
+        counts
+    }
+
+    /// The chain's deterministic stream, for the [`crate::envelope`] generators
+    /// (and anything else a test wants to draw reproducibly).
+    pub fn rng(&mut self) -> &mut Rng {
+        &mut self.rng
+    }
+
+    /// A block of Tachyon transactions carrying, between them, `follow_ups`
+    /// follow-up, `first_contacts` first-contact and `wallet_states`
+    /// wallet-state entries with random tags and content, in a random order,
+    /// packed into valid envelopes of 1 to 16 entries, one per transaction.
+    pub fn envelope_block(
+        &mut self,
+        follow_ups: usize,
+        first_contacts: usize,
+        wallet_states: usize,
+    ) -> BlockSpec {
+        use crate::envelope::{AuthoredEntry, EntryKind};
+        let mut kinds = Vec::new();
+        kinds.extend(std::iter::repeat_n(EntryKind::FollowUp, follow_ups));
+        kinds.extend(std::iter::repeat_n(EntryKind::FirstContact, first_contacts));
+        kinds.extend(std::iter::repeat_n(EntryKind::WalletState, wallet_states));
+        crate::envelope::shuffle(&mut self.rng, &mut kinds);
+        let entries = kinds
+            .into_iter()
+            .map(|kind| AuthoredEntry::random(&mut self.rng, kind))
+            .collect();
+        self.entries_block(entries)
+    }
+
+    /// A block carrying exactly `entries`, in this order (so their ordinals
+    /// follow it), packed into valid envelopes of 1 to 16 entries, one per
+    /// Tachyon transaction. Ground keys (scenario 6) and repeated tags
+    /// (scenario 5) are placed this way.
+    pub fn entries_block(&mut self, entries: Vec<crate::envelope::AuthoredEntry>) -> BlockSpec {
+        let envelopes = crate::envelope::pack(&mut self.rng, entries);
+        BlockSpec::new().envelopes(&envelopes)
+    }
+
     /// Appends a block authored from `spec`; returns its hash (protocol order).
     pub fn append(&mut self, spec: BlockSpec) -> Hash32 {
         self.push(spec)
@@ -856,14 +1065,21 @@ impl SyntheticChain {
             return BlockSpec::new();
         }
         let mix = self.config.mix.clone();
+        let envelopes = self.config.envelopes.clone();
         let count = self.range(mix.tachyon_txs);
         let mut spec = BlockSpec::new();
         for _ in 0..count {
             let actions = self.range(mix.actions);
             let mut tx = TxSpec::tachyon(actions);
-            if self.rng.percent(mix.memo_percent) {
-                let len = self.range(mix.memo_len);
-                tx = tx.memo(self.rng.bytes(len as usize));
+            match &envelopes {
+                Some(envelopes) => tx.memo = draw_memo(&mut self.rng, envelopes, &mut self.tags),
+                None => {
+                    if self.rng.percent(mix.memo_percent) {
+                        let len = self.range(mix.memo_len);
+                        tx.memo =
+                            MemoSpec::Authored(AuthoredMemo::garbage(self.rng.bytes(len as usize)));
+                    }
+                }
             }
             if self.rng.percent(mix.proof_percent) {
                 tx = tx.random_proof(self.range(mix.tachygrams));
@@ -971,17 +1187,34 @@ impl SyntheticChain {
         };
         self.used_tachygrams
             .extend(stamp.tachygrams().iter().copied());
+        let cv_fee_max = spec.cv_fee_max.unwrap_or_else(|| self.rng.array());
+        let binding_sig = spec.binding_sig.unwrap_or_else(|| self.rng.array());
+        let authored_memo = match spec.memo {
+            MemoSpec::Authored(memo) => memo,
+            MemoSpec::Malformed(malformation) => {
+                AuthoredMemo::Malformed(malformation.author(&mut self.rng))
+            }
+        };
+        if let AuthoredMemo::Envelope(envelope) = &authored_memo {
+            if let Err(error) = envelope.check() {
+                panic!("an invalid envelope authored as valid: {error}");
+            }
+            for entry in &envelope.entries {
+                self.tags.insert(entry.kind(), *entry.tag());
+            }
+        }
         let bundle = TachyonBundle {
             actions,
             value_balance_zat: spec.value_balance_zat,
-            cv_fee_max: spec.cv_fee_max.unwrap_or_else(|| self.rng.array()),
-            binding_sig: spec.binding_sig.unwrap_or_else(|| self.rng.array()),
-            memo: spec.memo,
+            cv_fee_max,
+            binding_sig,
+            memo: authored_memo.to_bytes(),
             stamp,
         };
-        Tx::new(
+        Tx::with_authored_memo(
             TxBody::Tachyon(bundle),
             spec.expiry_height.unwrap_or(height + EXPIRY_DELTA),
+            authored_memo,
         )
     }
 

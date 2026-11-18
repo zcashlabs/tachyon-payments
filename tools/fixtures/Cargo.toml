@@ -31,6 +31,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 [dev-dependencies]
 # The JSON-RPC transport the publisher uses; tests prove the double speaks to it.
 pir-node-rpc = { workspace = true }
+# The products' envelope parser, used only by tests/envelope.rs to cross-check
+# that it accepts every authored envelope and refuses every malformation. The
+# library never uses it: the authored ground truth must stay independent.
+tachyon-pir-protocol = { path = "../../src/shared/tachyon-pir-protocol" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

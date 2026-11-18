@@ -10,9 +10,15 @@
 //!   control endpoints.
 //! - The `tachyon-node-double` binary serves a [`ChainSpec`] file as a separate
 //!   process.
+//! - [`envelope`]: the synthetic envelope generator (spec section 5). It writes
+//!   `vMemoTachyon` envelopes, valid and malformed, from the spec, and the chain
+//!   keeps them as authored so the memo and first-contact oracle never parses
+//!   bytes.
 //!
-//! This crate deliberately does not depend on `tachyon-chain`: it is the oracle
-//! the decoder is tested against.
+//! This crate deliberately does not depend on `tachyon-chain` or on the
+//! envelope parser in `tachyon-pir-protocol`: it is the oracle they are tested
+//! against.
+pub mod envelope;
 pub mod hash;
 pub mod json;
 pub mod model;
@@ -20,12 +26,17 @@ mod rng;
 pub mod server;
 pub mod spec;
 
+pub use envelope::{
+    AuthoredEntry, AuthoredEnvelope, AuthoredMemo, EntryKind, EnvelopeCounts, EnvelopeJson,
+    EnvelopeMix, FirstContactTruth, FollowUpTruth, Malformation, MalformedMemo, MemoSpec,
+};
 pub use hash::{Hash32, display, parse_display};
 pub use model::{
     Action, ActionsSpec, Block, BlockSpec, ChainConfig, Coinbase, FixtureError, Found,
     PointerStamp, ProofStamp, Stamp, StampSpec, SyntheticChain, TachyonBundle, TachyonTxTruth, Tx,
     TxBody, TxMix, TxSpec,
 };
+pub use rng::Rng;
 pub use server::{
     BasicAuth, BlockMismatch, Failure, NodeDouble, NodeOptions, RecordedCall, StaleBlocks,
 };

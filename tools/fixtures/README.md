@@ -1,12 +1,13 @@
 # tachyon-fixtures
 
-The node double and synthetic chains for the Tachyon PIR services' fast tests
-(spec sections 4.2 and 13.1). The synthetic envelope generator (spec section 5)
-is a later milestone and is not here yet.
+The node double, synthetic chains and the synthetic envelope generator for the
+Tachyon PIR services' fast tests (spec sections 4.2, 5 and 13.1).
 
-The crate does **not** depend on `tachyon-chain` or any other decoder of the
-node's JSON. It is the independent oracle the decoder and the products are
-checked against, so it must stay that way.
+The crate does **not** depend on `tachyon-chain`, on the envelope parser in
+`tachyon-pir-protocol`, or on any other decoder of the node's JSON or of memos.
+It is the independent oracle the decoder and the products are checked against,
+so it must stay that way. (`tachyon-pir-protocol` is a dev-dependency used only
+by `tests/envelope.rs` to cross-check the parser against the authored truth.)
 
 ## Synthetic chain model (`SyntheticChain`)
 
@@ -54,9 +55,89 @@ included, in any process.
   appends the new ones. It may shorten the chain; a fork above the tip is
   refused.
 - **Ground truth**: `blocks()`, `block(h)`, `lookup(hash)`, `Block::txs()`,
-  `Block::tachyon_txs()` (index in block, txid, own actions, memo bytes, stamp),
-  `Block::tachygrams()`, `active_tachygrams()`. These return the values as
-  authored and never parse the served JSON.
+  `Block::tachyon_txs()` (index in block, txid, own actions, memo bytes, the
+  authored memo, stamp), `Block::tachygrams()`, `active_tachygrams()`. These
+  return the values as authored and never parse the served JSON. The envelope
+  ground truth is below.
+
+## Synthetic envelopes (`tachyon_fixtures::envelope`)
+
+The generator writes `vMemoTachyon` envelopes itself, straight from spec
+section 5.1, and the chain keeps every memo **as authored**. Nothing in the crate
+parses an envelope, so the memo and first-contact oracle of an end-to-end test
+shares no code with the products' parser.
+
+- **Authoring**: `AuthoredEnvelope { entries }` with
+  `AuthoredEntry::FollowUp { tag, ciphertext: [u8; 128] }`,
+  `FirstContact { tag, kem_ciphertext: [u8; 1088], ciphertext: [u8; 128] }` and
+  `WalletState { tag, ciphertext: Vec<u8> }`. `to_bytes()` is
+  `"TPM1" || u8 count || (kind || tag(32) || body)*`, a wallet-state body being
+  `len (u16 LE) || ciphertext`. `check()` / `is_valid()` apply the spec's rules to
+  the authored values (1 to 16 entries, wallet state at most 1024 bytes, nonzero
+  `key16`; the generator also never authors an all-zero wallet-state key, which
+  spec 6.2 leaves unspecified).
+- **Malformed envelopes** (scenario 7): `Malformation::author(rng)` or
+  `AuthoredEnvelope::malformed(kind, rng)`. Each breaks exactly the rule it names
+  and keeps every other one:
+
+  | `Malformation` (JSON name) | Bytes |
+  |---|---|
+  | `BadMagic` (`bad_magic`) | a valid envelope with another 4-byte magic |
+  | `MissingCount` (`missing_count`) | exactly `TPM1` |
+  | `CountZero` (`count_zero`) | `TPM1 00` |
+  | `CountAboveMax` (`count_above_max`) | count 17, 17 well-formed entries |
+  | `CountExceedsEntries` (`count_exceeds_entries`) | count `n + 1` (at most 16), `n` whole entries |
+  | `UnknownKind` (`unknown_kind`) | one entry with kind `0x00` or `0x04..=0xff`, a tag and 128 body bytes |
+  | `TruncatedBody` (`truncated_body`) | the last entry's body cut by 1 byte up to all of it |
+  | `TrailingBytes` (`trailing_bytes`) | a valid envelope plus 1 to 32 bytes |
+  | `StateTooLong` (`state_too_long`) | one wallet state with `len` 1025 to 1100 and `len` bytes |
+  | `FollowUpZeroKey` (`follow_up_zero_key`) | one follow-up whose `key16` is all zero |
+  | `FirstContactZeroKey` (`first_contact_zero_key`) | one first contact whose `key16` is all zero |
+  | `RandomGarbage` (`random_garbage`) | 1 to 300 random bytes not starting with `TPM1` |
+
+- **Generators** (all deterministic from a `Rng`; `chain.rng()` is the chain's
+  own stream): `random_tag` (nonzero `key16`), `tag_with_key16` (a test's ground
+  key plus 16 random bytes, scenario 6), `AuthoredEntry::random`,
+  `random_with_tag`, `random_sized`, `AuthoredEnvelope::random(rng, n, m, k)`,
+  and `pack(rng, entries)`, which splits entries in order into envelopes of 1 to
+  16. On the chain: `envelope_block(n, m, k)` (that many follow-up,
+  first-contact and wallet-state entries, shuffled and packed one envelope per
+  transaction) and `entries_block(entries)` (exactly these entries, in this
+  order: repeated tags for scenario 5, ground keys for scenario 6).
+- **Transactions**: `TxSpec::envelope(&envelope)` (panics on an invalid one),
+  `TxSpec::malformed_memo(Malformation)` (bytes drawn from the chain's stream at
+  build time), `TxSpec::malformed_bytes(MalformedMemo)`, and
+  `BlockSpec::envelopes(&[..])` (one transaction per envelope). `TxSpec::memo`
+  still takes raw bytes, recorded as unclassified.
+- **Random envelopes**: `ChainConfig::envelopes = Some(EnvelopeMix { .. })` (the
+  chain spec's `envelopes`) gives generated Tachyon transactions an envelope with
+  chance `envelope_percent` (else an empty memo), malformed with chance
+  `malformed_percent` (a `Malformation` drawn uniformly), else valid with
+  `follow_ups`, `first_contacts`, `wallet_states` entries (inclusive ranges,
+  shuffled; at least one entry, at most 16) and `wallet_state_len` bytes per
+  wallet state. With chance `repeat_tag_percent` an entry reuses a tag already
+  drawn for its kind on the chain, earlier entries of the same envelope included
+  (scenario 5); with chance `key16_percent` its tag takes one of `key16s`
+  (scenario 6). Without a mix (`None`, the default), generated memos are the
+  `TxMix`'s random bytes as before; they never start with `TPM1` and are
+  recorded as `RandomGarbage`.
+- **Ground truth**: `Tx::authored_memo()` and `TachyonTxTruth::authored_memo`
+  give each Tachyon transaction's `AuthoredMemo`: `Empty`, `Envelope(..)`,
+  `Malformed(MalformedMemo { malformation, bytes })` or `Raw(bytes)` (set by a
+  test; not classified). From it, never from bytes:
+  - `Block::follow_ups()`, `chain.follow_ups(heights)`: every follow-up entry of
+    a valid envelope as `FollowUpTruth { height, tx_index, entry_index, tag,
+    ciphertext }`, in ordinal order `(height, tx index in block, entry index)`
+    (spec 5.2). `tx_index` is the position in the block's `tx` list, the
+    coinbase being 0; `entry_index` counts every entry of the envelope.
+  - `Block::first_contacts()`, `chain.first_contacts(heights)`:
+    `FirstContactTruth { .., tag, kem_ciphertext, ciphertext }`, likewise.
+  - `Block::envelope_counts()`, `chain.envelope_counts(heights)`:
+    `EnvelopeCounts { empty, valid, malformed, raw, follow_ups, first_contacts,
+    wallet_states }` (entries of valid envelopes only).
+
+  These read the active chain; a block re-authored with `BlockSpec::from_block`
+  keeps its envelopes and their truth.
 
 ## JSON-RPC server (`NodeDouble`)
 
@@ -158,11 +239,29 @@ Chain spec file (every field optional; unknown fields are refused):
     {"txs": [
       {"actions": 2, "memo_hex": "54504d31", "stamp": {"type": "proof", "tachygrams": ["<64 hex>", "..."]}},
       {"actions": 1, "stamp": {"type": "random_proof", "count": 7}},
-      {"actions": 3, "stamp": {"type": "pointer"}, "fee_zat": 50000, "value_balance_zat": 0}
+      {"actions": 3, "stamp": {"type": "pointer"}, "fee_zat": 50000, "value_balance_zat": 0},
+      {"envelope": {"entries": [
+        {"kind": "follow_up", "tag": "<64 hex>", "ciphertext": "<256 hex>"},
+        {"kind": "first_contact", "tag": "<64 hex>", "kem_ciphertext": "<2176 hex>", "ciphertext": "<256 hex>"},
+        {"kind": "wallet_state", "tag": "<64 hex>", "ciphertext": "<up to 2048 hex>"}
+      ]}},
+      {"malformed": "trailing_bytes"}
     ]}
-  ]
+  ],
+  "envelopes": {"envelope_percent": 80, "malformed_percent": 10,
+                "follow_ups": [0, 4], "first_contacts": [0, 1], "wallet_states": [0, 1],
+                "wallet_state_len": [0, 64], "repeat_tag_percent": 10,
+                "key16s": ["<32 hex>"], "key16_percent": 0}
 }
 ```
+
+A transaction takes at most one of `memo_hex`, `envelope` (refused unless valid;
+`TxJson::with_envelope(&envelope)` writes one from an `AuthoredEnvelope`) and
+`malformed` (a `Malformation` name; the bytes are drawn from the chain's stream,
+so an in-process build draws the same ones). `envelopes` (shown with its
+defaults) applies to `random_blocks` and to random blocks appended or reorged in
+through the control endpoints; omitted, generated memos are the mix's random
+bytes.
 
 `random_blocks` generated blocks follow genesis, then `explicit_blocks` in
 order. `"activation_height": null` leaves NuTachyon out.
@@ -208,3 +307,12 @@ A `<block>` is `{"txs": [<tx>...], "time": t}` with `<tx>` as in the spec file.
 - `binary`: the binary prints its URL, serves the spec's chain (equal to an
   in-process build), authenticates with a cookie, and obeys control reorgs and
   appends; a bad spec is refused.
+- `envelope`: each kind's bytes against hand-written bytes; every
+  `Malformation` breaks exactly its rule (a structural walk written in the test,
+  with that one rule switched off or repaired the bytes are valid); the node
+  double serves the authored memo hex; ordinal order of the ground truth;
+  repeated tags across blocks and within one envelope; ground keys; envelope
+  specs for the binary (including control appends) and their refusals;
+  determinism from the seed; and a cross-check that `tachyon-pir-protocol`'s
+  parser accepts every authored envelope with equal content and refuses every
+  malformation with the matching error.
