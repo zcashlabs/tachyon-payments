@@ -57,10 +57,17 @@ pub struct Chain {
     /// The follower's tip poll interval, nonzero.
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
-    /// Blocks per epoch on this network (spec 15), nonzero. Bound into every
+    /// Blocks per epoch on this network (spec 15), at least 2 (spec 11.3:
+    /// with `SEAL_DEPTH` 100, one-block epochs would leave more than
+    /// `MAX_OPEN_SCOPES` scopes open). Bound into every
     /// chain product's journal and distribution scope, so it has no default.
     pub epoch_length: u32,
 }
+
+/// The shortest epoch a network may have: an epoch stays open `SEAL_DEPTH`
+/// (100) blocks after it ends, and a chain subject names at most
+/// `MAX_OPEN_SCOPES` (64) open-scope blocks (spec 11.3).
+pub const MIN_EPOCH_LENGTH: u32 = 2;
 
 fn default_poll_ms() -> u64 {
     1000
@@ -185,7 +192,7 @@ impl Config {
     ///    Cargo feature (spec 4.2).
     /// 3. The `chain` section, when present: a credential-free `http(s)` URL,
     ///    exactly one of `no_auth` and an absolute `rpc_cookie`, nonzero
-    ///    `poll_ms` and `epoch_length`. It is required when any product is
+    ///    `poll_ms`, `epoch_length` at least 2. It is required when any product is
     ///    enabled.
     /// 4. Each compiled product's settings against its own schema (unknown
     ///    fields refused); an enabled product needs settings.
@@ -272,8 +279,12 @@ impl Chain {
         if self.poll_ms == 0 {
             return Err("chain poll_ms must be nonzero".into());
         }
-        if self.epoch_length == 0 {
-            return Err("chain epoch_length must be at least one block".into());
+        if self.epoch_length < MIN_EPOCH_LENGTH {
+            return Err(format!(
+                "chain epoch_length {} must be at least {MIN_EPOCH_LENGTH} (spec 11.3)",
+                self.epoch_length
+            )
+            .into());
         }
         Ok(ChainPlan {
             settings: ChainSettings {
@@ -288,7 +299,7 @@ impl Chain {
 
 /// Parse a compiled product's settings against its schema, naming the
 /// section in the error.
-#[cfg_attr(not(feature = "tachygram"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "memo", feature = "tachygram")), allow(dead_code))]
 pub(crate) fn settings<T: serde::de::DeserializeOwned>(
     product: Product,
     section: &Section,

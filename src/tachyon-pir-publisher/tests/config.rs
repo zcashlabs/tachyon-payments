@@ -183,7 +183,12 @@ fn chain_rules() {
         (
             "epoch_length",
             json!(0),
-            "epoch_length must be at least one block",
+            "epoch_length 0 must be at least 2",
+        ),
+        (
+            "epoch_length",
+            json!(1),
+            "epoch_length 1 must be at least 2",
         ),
         ("epoch_length", json!(-1), "invalid value"),
     ] {
@@ -195,6 +200,182 @@ fn chain_rules() {
     let mut relative = base();
     relative["chain"] = json!({"rpc_url": "http://127.0.0.1:18232", "rpc_cookie": "zakura/.cookie", "epoch_length": 16});
     assert!(refusal(relative).contains("rpc_cookie zakura/.cookie must be absolute"));
+}
+
+#[test]
+fn epoch_length_two_is_the_shortest_accepted() {
+    let mut value = base();
+    value["chain"]["epoch_length"] = json!(2);
+    assert_eq!(
+        parse(&value)
+            .unwrap()
+            .plan()
+            .unwrap()
+            .chain
+            .unwrap()
+            .epoch_length,
+        2
+    );
+}
+
+#[cfg(all(feature = "memo", feature = "first-contact", feature = "tachygram"))]
+#[test]
+fn the_example_configuration_is_valid() {
+    let example: Value = serde_json::from_str(include_str!("../publisher.example.json")).unwrap();
+    let plan = parse(&example).unwrap().plan().unwrap();
+    assert_eq!(plan.product_names(), ["memo", "tachygram"]);
+    assert_eq!(plan.publishers[0].resources.probes.len(), 2);
+    assert_eq!(plan.chain.unwrap().epoch_length, 4096);
+}
+
+#[cfg(feature = "memo")]
+mod memo {
+    use super::*;
+
+    fn settings() -> Value {
+        json!({"listen": "127.0.0.1:9401", "state_dir": "/var/lib/tachyon-pir/memo"})
+    }
+
+    fn with_memo(first_contact: Option<Value>) -> Value {
+        let mut value = base();
+        value["memo"] = json!({"enabled": true, "settings": settings()});
+        if let Some(first_contact) = first_contact {
+            value["first_contact"] = first_contact;
+        }
+        value
+    }
+
+    #[test]
+    fn memo_alone_registers_one_chain_following_definition() {
+        let plan = parse(&with_memo(None)).unwrap().plan().unwrap();
+        assert_eq!(plan.product_names(), ["memo"]);
+        let definition = &plan.publishers[0];
+        assert!(definition.follows_chain());
+        assert_eq!(
+            definition.resources.listeners,
+            ["127.0.0.1:9401".parse().unwrap()]
+        );
+        assert!(
+            definition
+                .resources
+                .writable_paths
+                .contains(&"/var/lib/tachyon-pir/memo".into())
+        );
+        let probes: Vec<_> = definition.resources.probes.iter().map(|p| p.path).collect();
+        assert_eq!(probes, ["/provider/memo/v1/current"]);
+    }
+
+    #[test]
+    fn memo_settings_are_checked() {
+        let mut value = with_memo(None);
+        value["memo"]["settings"]["difficulty_bits"] = json!(20);
+        let error = refusal(value);
+        assert!(
+            error.contains("memo.settings: unknown field `difficulty_bits`"),
+            "{error}"
+        );
+
+        let mut value = with_memo(None);
+        value["memo"]["settings"]["state_dir"] = json!("memo");
+        assert!(refusal(value).contains("must be absolute"));
+
+        let mut value = with_memo(None);
+        value["memo"]["settings"]["listen"] = json!("0.0.0.0:9401");
+        assert!(refusal(value).contains("fixed port"));
+
+        let mut value = base();
+        value["memo"] = json!({"enabled": true});
+        assert!(refusal(value).contains("memo is enabled but has no settings"));
+
+        let mut value = with_memo(None);
+        value.as_object_mut().unwrap().remove("chain");
+        assert!(refusal(value).contains("memo is enabled but there is no chain section"));
+
+        // A disabled section registers nothing, but its settings are checked.
+        let mut value = base();
+        value["memo"] = json!({"enabled": false});
+        assert!(parse(&value).unwrap().plan().unwrap().publishers.is_empty());
+        value["memo"]["settings"] = json!({"listen": "127.0.0.1:9401"});
+        assert!(refusal(value).contains("memo.settings: missing field `state_dir`"));
+    }
+
+    #[cfg(feature = "first-contact")]
+    #[test]
+    fn first_contact_joins_the_memo_definition() {
+        let value = with_memo(Some(json!({"enabled": true, "settings": {}})));
+        let plan = parse(&value).unwrap().plan().unwrap();
+        assert_eq!(plan.product_names(), ["memo"]);
+        let definition = &plan.publishers[0];
+        assert_eq!(definition.resources.listeners.len(), 1);
+        let probes: Vec<_> = definition.resources.probes.iter().map(|p| p.path).collect();
+        assert_eq!(
+            probes,
+            [
+                "/provider/memo/v1/current",
+                "/provider/first-contact/v1/current"
+            ]
+        );
+
+        // Disabled first-contact: memo alone, settings optional.
+        for first_contact in [
+            json!({"enabled": false}),
+            json!({"enabled": false, "settings": {}}),
+        ] {
+            let plan = parse(&with_memo(Some(first_contact)))
+                .unwrap()
+                .plan()
+                .unwrap();
+            assert_eq!(plan.publishers[0].resources.probes.len(), 1);
+        }
+    }
+
+    #[cfg(feature = "first-contact")]
+    #[test]
+    fn first_contact_settings_are_checked() {
+        for settings in [
+            json!({"listen": "127.0.0.1:9404"}),
+            json!({"state_dir": "/x"}),
+        ] {
+            let value = with_memo(Some(json!({"enabled": true, "settings": settings})));
+            let error = refusal(value);
+            assert!(
+                error.contains("first_contact.settings: unknown field"),
+                "{error}"
+            );
+        }
+        let value = with_memo(Some(json!({"enabled": true})));
+        assert!(refusal(value).contains("first_contact is enabled but has no settings"));
+        // Still refused without memo enabled, whatever its settings.
+        let mut value = with_memo(Some(json!({"enabled": true, "settings": {}})));
+        value["memo"]["enabled"] = json!(false);
+        assert!(refusal(value).contains("first_contact is enabled but memo is not"));
+    }
+
+    #[cfg(feature = "tachygram")]
+    #[test]
+    fn memo_and_tachygram_need_disjoint_listeners_and_state() {
+        let mut value = with_memo(None);
+        value["tachygram"] = json!({"enabled": true, "settings": {
+            "listen": "127.0.0.1:9402", "state_dir": "/var/lib/tachyon-pir/tachygram"}});
+        let plan = parse(&value).unwrap().plan().unwrap();
+        assert_eq!(plan.product_names(), ["memo", "tachygram"]);
+
+        let mut shared_listener = value.clone();
+        shared_listener["tachygram"]["settings"]["listen"] = json!("127.0.0.1:9401");
+        let error = refusal(shared_listener);
+        assert!(
+            error.contains("conflicts with the memo listener"),
+            "{error}"
+        );
+
+        let mut nested = value.clone();
+        nested["tachygram"]["settings"]["state_dir"] = json!("/var/lib/tachyon-pir/memo/tachygram");
+        let error = refusal(nested);
+        assert!(
+            error.contains("overlaps the memo state directory"),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(feature = "tachygram")]
@@ -209,15 +390,6 @@ mod tachygram {
 
     fn settings() -> Value {
         json!({"listen": "127.0.0.1:9402", "state_dir": "/var/lib/tachyon-pir/tachygram"})
-    }
-
-    #[test]
-    fn the_example_configuration_is_valid() {
-        let example: Value =
-            serde_json::from_str(include_str!("../publisher.example.json")).unwrap();
-        let plan = parse(&example).unwrap().plan().unwrap();
-        assert_eq!(plan.product_names(), ["tachygram"]);
-        assert_eq!(plan.chain.unwrap().epoch_length, 4096);
     }
 
     #[test]

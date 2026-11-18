@@ -1979,6 +1979,7 @@ dependencies = [
  "axum",
  "clap",
  "libc",
+ "memo-publisher",
  "pir-pipeline",
  "pir-publisher",
  "pir-service-discovery",

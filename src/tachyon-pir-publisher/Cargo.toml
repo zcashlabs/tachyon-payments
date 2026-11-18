@@ -15,13 +15,13 @@ path = "src/main.rs"
 
 # Products are selected at build time; the default build hosts none (spec 4.2).
 # A configuration section for a product that is not compiled in is refused at
-# start-up. `memo`, `first-contact` and `registry` have no product library in
-# the workspace yet (milestones M2 and M3), so enabling them is a compile error
-# naming the missing crate; each becomes an optional dependency here when it
-# lands.
+# start-up. Memo and first-contact are one product library and one publisher
+# definition (spec 11.7). `registry` has no product library in the workspace
+# yet (milestone M3), so enabling it is a compile error naming the missing
+# crate; it becomes an optional dependency here when it lands.
 [features]
 default = []
-memo = []
+memo = ["dep:memo-publisher"]
 first-contact = ["memo"]
 tachygram = ["dep:tachygram-publisher"]
 registry = []
@@ -30,6 +30,7 @@ registry = []
 # Routers cross into wallet-pir's host library, which is on axum 0.7.
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
+memo-publisher = { path = "../memo/memo-publisher", optional = true }
 pir-pipeline = { workspace = true }
 # `chain` gives run_registered its root chain follower.
 pir-publisher = { workspace = true, features = ["chain"] }
@@ -54,3 +55,8 @@ tokio = { version = "1", features = ["full"] }
 name = "tachygram"
 path = "tests/tachygram.rs"
 required-features = ["tachygram"]
+
+[[test]]
+name = "memo"
+path = "tests/memo.rs"
+required-features = ["memo", "first-contact"]

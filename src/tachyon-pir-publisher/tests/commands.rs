@@ -27,11 +27,23 @@ fn valid() -> serde_json::Value {
 fn check_accepts_a_valid_file_offline_and_creates_nothing() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = valid();
+    let mut products = Vec::new();
+    if cfg!(feature = "memo") {
+        config["memo"] = json!({"enabled": true, "settings": {
+            "listen": free().to_string(),
+            "state_dir": temp.path().join("memo"),
+        }});
+        products.push("memo");
+    }
+    if cfg!(feature = "first-contact") {
+        config["first_contact"] = json!({"enabled": true, "settings": {}});
+    }
     if cfg!(feature = "tachygram") {
         config["tachygram"] = json!({"enabled": true, "settings": {
             "listen": free().to_string(),
             "state_dir": temp.path().join("tachygram"),
         }});
+        products.push("tachygram");
     }
     let path = write_config(temp.path(), "publisher.json", &config);
     let output = check(&path);
@@ -43,9 +55,8 @@ fn check_accepts_a_valid_file_offline_and_creates_nothing() {
     );
     assert!(stdout.contains("is valid"), "{stdout}");
     assert!(stdout.contains("the node was not contacted"), "{stdout}");
-    assert_eq!(
-        stdout.contains("products [tachygram]"),
-        cfg!(feature = "tachygram"),
+    assert!(
+        stdout.contains(&format!("products [{}]", products.join(", "))),
         "{stdout}"
     );
     // No state directory, lock or log was created.
@@ -67,6 +78,21 @@ fn check_rejects_an_unknown_field_with_status_one() {
         "the error names the file: {stderr}"
     );
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn check_rejects_a_one_block_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = valid();
+    config["chain"]["epoch_length"] = json!(1);
+    let path = write_config(temp.path(), "publisher.json", &config);
+    let output = check(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("epoch_length 1 must be at least 2"),
+        "{stderr}"
+    );
 }
 
 #[test]

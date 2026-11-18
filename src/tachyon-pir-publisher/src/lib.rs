@@ -13,10 +13,6 @@
 //! 3. [`run`] reads the node's network identity once and refuses to start
 //!    without `NuTachyon` (spec 11.1), then hands the plan to
 //!    `run_registered` until the [`Shutdown`] is requested.
-#[cfg(feature = "memo")]
-compile_error!(
-    "the `memo` (and `first-contact`) feature needs the memo-publisher crate (milestone M2), which is not in the workspace yet"
-);
 #[cfg(feature = "registry")]
 compile_error!(
     "the `registry` feature needs the registry-publisher crate (milestone M3), which is not in the workspace yet"
