@@ -8,6 +8,7 @@ members = [
     "src/shared/tachyon-pir-table",
     # Products.
     "src/memo/memo-store",
+    "src/memo/memo-publisher",
     "src/tachygram/tachygram-store",
     "src/tachygram/tachygram-publisher",
     # Hosts.

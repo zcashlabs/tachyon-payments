@@ -1,0 +1,36 @@
+[package]
+name = "memo-publisher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The memo and first-contact products' publisher: chain ingestion into memo-v1.sqlite, epoch and span table publication and their distribution routes (spec sections 5, 7, 10.3 and 11)"
+
+[dependencies]
+# Routers cross into wallet-pir's host library, which is on axum 0.7.
+axum = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hex = "0.4"
+memo-store = { path = "../memo-store" }
+pir-observability = { workspace = true, features = ["http"] }
+pir-pipeline = { workspace = true }
+pir-publication = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tachyon-chain = { path = "../../shared/tachyon-chain" }
+tachyon-pir-distribution = { path = "../../shared/tachyon-pir-distribution" }
+tachyon-pir-protocol = { path = "../../shared/tachyon-pir-protocol" }
+tachyon-pir-table = { path = "../../shared/tachyon-pir-table" }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The host the publisher binary registers this product with, for the
+# end-to-end registration test.
+pir-publisher = { workspace = true, features = ["chain"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tachyon-fixtures = { path = "../../../tools/fixtures" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
