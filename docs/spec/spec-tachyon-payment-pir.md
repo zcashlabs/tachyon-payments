@@ -1074,6 +1074,9 @@ Each product implements `pir_pipeline::Publication` and `Publisher` and uses
   `log_sequence`. It is at most `MAX_INVENTORY_BYTES = 16 MiB`, which holds
   about 60,000 tables; an archive tier (section 11.5) is the answer when
   history outgrows it. A map chunk is at most `MAX_MAP_CHUNK_BYTES = 8 MiB`.
+- A chain subject names at most `MAX_OPEN_SCOPES = 64` open-scope blocks. An
+  epoch stays open for `SEAL_DEPTH` blocks after it ends, so a network's
+  `epoch_length` MUST be at least 2 (at 2, about 51 epochs are open at once).
 - An authority check carries at most 256 subjects and
   `MAX_CHECK_BLOCKS = 4,096` blocks in total.
 - The publisher keeps the objects of a displaced publication for
@@ -1097,7 +1100,9 @@ something, coalesced to one active and one pending, as Enhance does.
   `PublicationAuthority` (which also withdraws), as Status does after a
   withdrawal. Whether a rewind reaches a sealed scope is judged against the
   last publication in the envelope, eligible or not, so a withdrawal made
-  earlier (for example by the canonical guard) still leads to `Recover`. A rewind that stays inside open scopes applies
+  earlier (for example by the canonical guard) still leads to `Recover`.
+  Memo and first-contact each judge against their own last publication; the
+  two may differ in anchor. A rewind that stays inside open scopes applies
   `AuthorityTransition::Withdraw` if the current publication's anchor is above
   the kept block. Either transition is durable before the journal rewinds.
 - A publisher restart always starts a new recovery epoch, as
@@ -1194,8 +1199,8 @@ Publisher:
   publisher.
 - `first_contact` shares the memo state directory (`memo-v1.sqlite`) and
   requires `memo` to be enabled. Memo and first-contact therefore run as **one**
-  publisher definition on the memo listener, serving both distribution
-  prefixes.
+  publisher definition, registered under the name `memo`, on the memo
+  listener, serving both distribution prefixes.
 - `epoch_length` is read per network (section 15). Tests use a small value so
   that synthetic chains cross epoch boundaries in a few hundred blocks.
 - The registry listener serves both the registry distribution prefix and the
@@ -1409,6 +1414,7 @@ until wallets publish envelopes.
 | `MAX_MAP_CHUNK_BYTES` | 8 MiB | This spec (section 11.3) |
 | `MAX_INVENTORY_BYTES` | 16 MiB | This spec (section 11.3) |
 | `MAX_CHECK_BLOCKS` | 4,096 | From `wallet-pir` Receiver |
+| `MAX_OPEN_SCOPES` | 64 | This spec (section 11.3); forces `epoch_length` ≥ 2 |
 | `PUBLISHER_RETENTION_SECONDS` | 600 | This spec (section 11.3) |
 | `max_unconfirmed_seconds` (default) | 600 | Configuration (section 11.6) |
 | `GEOMETRY` (published) | `tachyon-4k8` | Version 1 (section 6.1) |
