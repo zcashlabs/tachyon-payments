@@ -689,6 +689,18 @@ digest = SHA-256("tachyon-pir/registry/v1/addr\0" || addr)
 key16  = digest[0..16]
 ```
 
+- `pk` is the payment key `Com(ak, nk)` of the Tachyon Book, a Poseidon
+  commitment in Tachyon's protocol field, the Pallas base field
+  `F_p`, `p = 0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001`.
+  It is encoded as 32 bytes little-endian; it is **canonical** when its
+  integer value is less than `p`. (Provisional with D1: the encoding follows
+  Orchard's `pallas::Base::to_repr`.)
+- `ek` is an ML-KEM-768 encapsulation key (FIPS 203): `ByteEncode12(t̂) || ρ`,
+  1,152 bytes of 768 12-bit coefficients followed by the 32-byte seed `ρ`. It
+  passes the **modulus check** of FIPS 203 section 7.2 when every coefficient,
+  read as 12 bits little-endian in order, is less than `q = 3,329`, that is
+  when `ByteEncode12(ByteDecode12(ek[0..1152])) == ek[0..1152]`.
+
 ### 9.2 Chunks
 
 - **Scope**: a **chunk**, a run of registrations in log order.
@@ -728,10 +740,23 @@ challenge(32) || nonce(8) || addr(1216)
 - Proof of work: `SHA-256("tachyon-pir/registry/v1/pow\0" || challenge || nonce || digest)`
   MUST have at least `difficulty_bits` leading zero bits. Binding the digest
   stops one solution being reused for many addresses.
-- Challenges are stateless: an HMAC over the expiry under a publisher secret.
-  Lifetime `REGISTRY_CHALLENGE_SECONDS = 600`.
-- Validation: body length exact; `pk` a canonical field element; `ek` passes
-  the ML-KEM-768 encapsulation-key modulus check; `key16` not all zero.
+- Challenges are stateless. The 32-byte challenge is
+  `expires_unix(u64 LE, 8 bytes) || HMAC-SHA256(secret, "tachyon-pir/registry/v1/challenge\0" || expires_unix(u64 LE))[0..24]`,
+  so the publisher verifies it from the body alone. `secret` is 32 random
+  bytes generated at the registry's first start and kept in its state
+  directory (`challenge-secret`, mode 0600), so challenges survive a restart.
+  Lifetime `REGISTRY_CHALLENGE_SECONDS = 600`: `expires_unix` is the issue time
+  plus 600, and a challenge is refused once the publisher's clock passes it.
+  One challenge may be used for any number of registrations until it expires;
+  the proof of work binds each to its digest.
+- `difficulty_bits` in the challenge response is the publisher's configured
+  difficulty; a registration is checked against the configured difficulty at
+  the time it arrives.
+- Validation, in order: body length exact; challenge authentic and not
+  expired; proof of work; `pk` canonical (section 9.1); `ek` passes the
+  modulus check (section 9.1); `key16` not all zero. Any failure is `400`
+  `invalid_request` with a message naming the check; a proof-of-work failure
+  also counts in `tachyon_registry_pow_rejected_total`.
 - Success response, `200`:
 
 ```json
@@ -749,14 +774,19 @@ challenge(32) || nonce(8) || addr(1216)
 
 Abuse controls:
 
-| Control | Value |
-|---|---|
-| Proof of work | `difficulty_bits` configurable, default 20 |
-| Per-client concurrent registrations | 2 (`pir_control::ClientSlots`) |
-| Per-client rate | 6 per minute, configurable |
-| Body limit | 1,256 bytes exactly; otherwise `400` or `413` |
-| Upload deadline | 15 s, then `408` |
-| Global rate | configurable cap per minute; above it `429` with `Retry-After` |
+| Control | Value | Configuration (`registry.settings`) |
+|---|---|---|
+| Proof of work | default 20 bits | `difficulty_bits` |
+| Per-client concurrent registrations | 2 (`pir_control::ClientSlots`); above it `429` | `per_client_concurrent` |
+| Per-client rate | 6 per minute; above it `429` with `Retry-After` | `per_client_per_minute` |
+| Body limit | 1,256 bytes exactly; shorter `400`, longer `413` | fixed |
+| Upload deadline | 15 s, then `408` | `upload_ms` (default 15,000) |
+| Global rate | 600 per minute by default; above it `429` with `Retry-After` | `global_per_minute` |
+
+Rates are counted over a sliding 60-second window of accepted-for-processing
+requests; `Retry-After` is the whole number of seconds until the window admits
+the client again, at least 1. A refused request does not count against the
+rate. The challenge route is not rate-limited beyond the global cap.
 
 Errors use the common body of section 10.5.
 
