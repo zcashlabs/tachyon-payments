@@ -2,4 +2,19 @@
 name = "memo-store"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 publish = false
+description = "The memo and first-contact products' SQLite journal, memo-v1.sqlite (spec sections 5, 7.1 to 7.3)"
+
+[dependencies]
+# Same version and features as wallet-pir's receiver-store.
+rusqlite = { version = "0.37", features = ["bundled"] }
+tachyon-chain = { path = "../../shared/tachyon-chain" }
+# The envelope parser, entry layouts and span constants (spec 5, 6.2, 15).
+tachyon-pir-protocol = { path = "../../shared/tachyon-pir-protocol" }
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+tachyon-fixtures = { path = "../../../tools/fixtures" }
+tempfile = "3"
