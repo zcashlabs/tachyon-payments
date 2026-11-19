@@ -1176,7 +1176,9 @@ hours. Unbounded retention is not affordable on one host.
   floor" to its caller.
 - The publisher keeps every sealed object. Retention is a serving decision.
 - Default `retain_scopes`: memo 64, tachygram 64, first-contact unlimited,
-  registry unlimited. An absent `retain_scopes` means the product default;
+  registry unlimited. For the registry `retain_scopes` counts chunks; a value
+  of 1 serves only the open chunk, so a chunk that has just sealed stops being
+  served as soon as the next one opens. An absent `retain_scopes` means the product default;
   there is no explicit "unlimited" value, and a configured value is at
   least 1.
 
@@ -1272,6 +1274,8 @@ Query server:
 
 `publisher_ca` is optional; without it the system roots are used.
 
+- The registry section takes no `activation_height` or `epoch_length` (it
+  refuses them); its distribution scope is the registry form of section 11.3.
 - Chain products also set `activation_height` and `epoch_length`. With
   `publisher_genesis` they fix the distribution scope (section 11.3), and every
   map the host accepts must state the same values.
