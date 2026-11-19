@@ -51,14 +51,19 @@ fn compiled(section: &str) -> bool {
     (section == "memo" && cfg!(feature = "memo"))
         || (section == "first_contact" && cfg!(feature = "first-contact"))
         || (section == "tachygram" && cfg!(feature = "tachygram"))
+        || (section == "registry" && cfg!(feature = "registry"))
 }
 
 #[test]
 fn a_section_for_a_product_not_compiled_in_is_refused() {
-    // The registry has no serving module in this milestone.
     for section in ["memo", "first_contact", "tachygram", "registry"] {
         let mut s = settings();
         s["state_dir"] = format!("/var/lib/tachyon-pir-query/{section}").into();
+        if section == "registry" {
+            let object = s.as_object_mut().unwrap();
+            object.remove("activation_height");
+            object.remove("epoch_length");
+        }
         let enabled = validate(&config(section, s.clone()));
         let mut disabled = config(section, s);
         disabled[section]["enabled"] = false.into();
@@ -197,4 +202,30 @@ fn invalid_settings_are_refused() {
         .unwrap()
         .remove("settings");
     assert!(validate(&missing).is_err(), "enabled without settings");
+}
+
+#[cfg(feature = "registry")]
+#[test]
+fn registry_settings_take_no_chain_parameters() {
+    let mut s = settings();
+    let validated = validate(&config("registry", s.clone()));
+    assert!(validated.unwrap_err().contains("do not apply"));
+    s.as_object_mut().unwrap().remove("activation_height");
+    assert!(
+        validate(&config("registry", s.clone())).is_err(),
+        "epoch_length too"
+    );
+    s.as_object_mut().unwrap().remove("epoch_length");
+    let validated = validate(&config("registry", s)).unwrap();
+    let product = &validated.products[0];
+    assert_eq!(product.module.section, "registry");
+    assert_eq!(product.chain, None);
+    assert_eq!(product.retain_scopes, None, "every chunk by default");
+    assert_eq!(
+        product.binding(),
+        tachyon_pir_distribution::ScopeBinding::registry(
+            *product.genesis.protocol_bytes(),
+            tachyon_pir_protocol::REGISTRY_CHUNK_ENTRIES
+        )
+    );
 }

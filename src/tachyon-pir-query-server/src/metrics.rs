@@ -67,6 +67,7 @@ pub struct ProductMetrics {
 pub struct Gauges {
     pub ready: bool,
     pub anchor_height: Option<u32>,
+    pub log_sequence: Option<u64>,
     pub generation: Option<u64>,
     pub recovery_epoch: Option<u64>,
     pub floor_scope: Option<u64>,
@@ -108,6 +109,7 @@ impl ProductMetrics {
         line("ready", "", u64::from(gauges.ready));
         for (name, value) in [
             ("anchor_height", gauges.anchor_height.map(u64::from)),
+            ("log_sequence", gauges.log_sequence),
             ("generation", gauges.generation),
             ("recovery_epoch", gauges.recovery_epoch),
             ("floor_scope", gauges.floor_scope),

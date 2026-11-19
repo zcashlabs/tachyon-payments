@@ -14,9 +14,8 @@ path = "src/lib.rs"
 name = "tachyon-pir-query-server"
 path = "src/main.rs"
 
-# Products are selected independently (spec 4.2); the default is none.
-# `registry` has no serving module yet. A configuration section for a product
-# without a compiled serving module is refused at start-up.
+# Products are selected independently (spec 4.2); the default is none. A
+# configuration section for a product not compiled in is refused at start-up.
 [features]
 default = []
 memo = []
@@ -76,6 +75,11 @@ required-features = ["memo"]
 name = "first_contact"
 path = "tests/first_contact.rs"
 required-features = ["first-contact"]
+
+[[test]]
+name = "registry"
+path = "tests/registry.rs"
+required-features = ["registry"]
 
 [[test]]
 name = "binary"

@@ -37,8 +37,13 @@ strictly increasing for tachygram) and the height check (tachygram only).
 First-contact scopes are spans: the shared core uses the scope index (the
 span's position) for the listing, the inventory, the floor and
 `retain_scopes`, and the span's `scope_id` (its first epoch) for placement
-and session ids. The registry adds `MapFamily::Registry` (its `RegistryMapHead` in `map.rs`, its scope
-binding in `config.rs`) and a module.
+and session ids. The registry is `MapFamily::Registry`: `RegistryMapHead`
+and `RegistryMapChunk` (`map.rs`), the scope binding
+`ScopeBinding::registry(genesis, REGISTRY_CHUNK_ENTRIES)` (`config.rs`) and
+the subject `Subject::Registry { log_sequence }`, checked against the map's
+`log_sequence` (`prepare.rs`). Its scopes are chunks with
+`scope_id = scope index = chunk_id` and one bucket; row validation requires
+every `key16` to equal its address's digest prefix.
 
 ## Usage
 
@@ -107,11 +112,13 @@ verifies new objects, prepares, and only then switches. Preparation of a
 publication:
 
 1. The map head and every chunk are parsed and checked with the protocol
-   crate's client checks (`ChainMapHead::validate`, `parse_chunk`,
-   `check_listing`) and must be canonically encoded (spec 10.3); the head's `network`, `genesis_hash`,
-   `activation_height` and `epoch_length` must be the configured ones; its
-   `generation` and `recovery_epoch` the inventory's; the authority subject
-   must be the map's anchor and the last block of every open scope; the
+   crate's client checks (`validate`, `parse_chunk`, `check_listing` of
+   `ChainMapHead` or `RegistryMapHead`) and must be canonically encoded
+   (spec 10.3); the head's `network` and `genesis_hash`, and for chain
+   products `activation_height` and `epoch_length`, must be the configured
+   ones; its `generation` and `recovery_epoch` the inventory's; the
+   authority subject must be the map's anchor and the last block of every
+   open scope (chain products) or the map's `log_sequence` (registry); the
    inventory's newest scope, chunks and tables (session ids, `rows_sha256`,
    `public_sha256`) must be exactly the map's.
 2. For every table at or above the host floor that no held runtime covers:
@@ -122,7 +129,11 @@ publication:
    the published object.
 
 Builds and validation run on a dedicated rayon pool of half the cores. Any
-failure refuses the publication and the previous one keeps serving. A
+failure refuses the publication and the previous one keeps serving. A failed
+pass is retried with `pir_pipeline`'s back-off (10 s, doubling, at most
+120 s), except a pass that failed only because the publisher withdrew or
+superseded the publication being synchronized, which the distribution
+crate's `Engine` retries about once a second (`lost_race`, spec 11.6). A
 displaced publication of the same recovery epoch keeps serving for 600 s;
 sessions dropped by a recovery answer 410 for 600 s; while the publisher is
 unreachable the host serves what it last confirmed for
@@ -137,8 +148,9 @@ Exit status 0.
 
 Each product at its canonical and legacy mount (`/memo/v1` and `/v1/memo`,
 `/first-contact/v1` and `/v1/first-contact`, `/tachygram/v1` and
-`/v1/tachygram`), through `pir_control::public_routes::PublicMount`. Query
-magics `TMQ1`, `TFQ1`, `TGQ1`.
+`/v1/tachygram`, `/registry/v1` and `/v1/registry`), through
+`pir_control::public_routes::PublicMount`. Query magics `TMQ1`, `TFQ1`,
+`TGQ1`, `TRQ1`.
 
 | Route | Answer |
 |---|---|
@@ -171,12 +183,13 @@ overwrite those headers.
 
 | Route | Answer |
 |---|---|
-| `GET /health` | `{"ready", "identity", "products": {"<product>": {"phase", "ready"}}}` keyed `memo`, `first-contact`, `tachygram`; phases `running`, `stopping`, `stopped`, `failed` |
+| `GET /health` | `{"ready", "identity", "products": {"<product>": {"phase", "ready"}}}` keyed `memo`, `first-contact`, `tachygram`, `registry`; phases `running`, `stopping`, `stopped`, `failed` |
 | `GET /ready` | The same body; 200 only when every enabled product is ready |
 | `GET /metrics` | Prometheus text: `pir_http_*{endpoint}` from `pir-observability` for the public routes, and the product metrics below |
 
-Product metrics, prefix `tachyon_memo_`, `tachyon_first_contact_` or
-`tachyon_tachygram_`: `ready`, `anchor_height`,
+Product metrics, prefix `tachyon_memo_`, `tachyon_first_contact_`,
+`tachyon_tachygram_` or `tachyon_registry_`: `ready`, `anchor_height` (chain
+products), `log_sequence` (registry),
 `generation`, `recovery_epoch`, `floor_scope`, `newest_scope`,
 `entries_total`, `open_scope_entries` (of the served map), `tables_served`,
 `runtime_held_bytes`, `sessions_revoked_total`,
@@ -189,8 +202,8 @@ labels are fixed (`<product>_map`, `<product>_map_chunk`, `<product>_public`,
 
 ## Tests
 
-`cargo test -p tachyon-pir-query-server --profile release-fast --features memo,first-contact,tachygram`.
-`tests/support` publishes synthetic publications of any chain product with real
+`cargo test -p tachyon-pir-query-server --profile release-fast --features memo,first-contact,tachygram,registry`.
+`tests/support` publishes synthetic publications of any product with real
 `tachyon-4k8` tables (`tachyon-pir-table`'s scope builder) through a
 publisher-side `Distribution` behind an in-test TLS terminator; the host runs
 in-process on its own listeners, or as the built binary. Wallet requests come
@@ -216,6 +229,11 @@ from the probe client (`tachyon-pir-cli`) or are built with
   `X-Floor-Scope` as scope indices; revocation (410 on `query` and
   `public`); a corrupt row refused; with `memo` also compiled, both products
   side by side in one host.
+- `registry`: a full sealed chunk (3,072 entries) and an open chunk with exact
+  answers on both mounts; an empty log and an empty open chunk, both without
+  tables, answering absent without a query; revocation (410 on `query` and
+  `public`), 409, wrong magic; a corrupt row refused; `X-Floor-Scope` as a
+  chunk index.
 - `binary`: `--check` exit codes; the binary bootstraps, answers and exits 0
   on SIGTERM with its ports released.
 - `config`: unknown fields, products not compiled in, role, listeners, paths

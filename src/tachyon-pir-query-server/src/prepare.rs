@@ -148,6 +148,11 @@ impl Preparer for HostPreparer {
                     );
                 }
             }
+            (None, None, Subject::Registry { log_sequence }) => {
+                if listing.log_sequence != Some(*log_sequence) {
+                    return Err("the authority subject's log_sequence is not the map's".into());
+                }
+            }
             _ => return Err("the publication's subject does not fit the product".into()),
         }
         let newest = listing.scopes.saturating_sub(1);

@@ -10,11 +10,14 @@ use tachyon_pir_protocol::Product;
 
 /// The shape of a product's map (spec 10.3). The chain products (memo,
 /// first-contact, tachygram) share one map type; the registry's map is a
-/// variant without heights or anchor, added with the registry module.
+/// variant without heights or anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapFamily {
     /// `ChainMapHead` with `Scope` objects.
     Chain,
+    /// `RegistryMapHead` with `RegistryScope` chunks: `log_sequence` in place
+    /// of the chain parameters and anchor, one open chunk.
+    Registry,
 }
 
 /// The fixed metric labels of one product's four public routes. Labels are
@@ -97,6 +100,8 @@ pub const MODULES: &[&ProductModule] = &[
     &crate::first_contact::MODULE,
     #[cfg(feature = "tachygram")]
     &crate::tachygram::MODULE,
+    #[cfg(feature = "registry")]
+    &crate::registry::MODULE,
 ];
 
 /// The compiled serving module of `product`.

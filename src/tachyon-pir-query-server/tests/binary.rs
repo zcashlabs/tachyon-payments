@@ -71,10 +71,23 @@ fn check_validates_offline_and_exits_one_on_errors() {
     let (ok, stderr) = check(&write_config(dir.path(), &config));
     assert!(!ok && stderr.contains("combined"), "{stderr}");
     config["tachygram"]["settings"]["role"] = "combined".into();
-    config["registry"] = serde_json::json!({"enabled": false});
+    // A section of a product not compiled in; with every product compiled,
+    // a registry section with chain parameters it does not take.
+    let compiled = [
+        ("memo", cfg!(feature = "memo")),
+        ("first_contact", cfg!(feature = "first-contact")),
+        ("registry", cfg!(feature = "registry")),
+    ];
+    let (section, refusal) = match compiled.iter().find(|(_, compiled)| !compiled) {
+        Some((section, _)) => (*section, "not compiled"),
+        None => ("registry", "do not apply"),
+    };
+    let mut other = config["tachygram"]["settings"].clone();
+    other["state_dir"] = dir.path().join(section).display().to_string().into();
+    config[section] = serde_json::json!({"enabled": true, "settings": other});
     let (ok, stderr) = check(&write_config(dir.path(), &config));
-    assert!(!ok && stderr.contains("not compiled"), "{stderr}");
-    config.as_object_mut().unwrap().remove("registry");
+    assert!(!ok && stderr.contains(refusal), "{stderr}");
+    config.as_object_mut().unwrap().remove(section);
     config["unknown"] = 1.into();
     let (ok, stderr) = check(&write_config(dir.path(), &config));
     assert!(!ok && stderr.contains("unknown field"), "{stderr}");

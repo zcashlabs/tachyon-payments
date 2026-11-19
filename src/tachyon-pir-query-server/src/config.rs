@@ -13,7 +13,9 @@ use std::{
     time::Duration,
 };
 use tachyon_pir_distribution::ScopeBinding;
-use tachyon_pir_protocol::{BlockHash, MAX_QUERY_BODY_BYTES, UPLOAD_DEADLINE_SECONDS};
+use tachyon_pir_protocol::{
+    BlockHash, MAX_QUERY_BODY_BYTES, REGISTRY_CHUNK_ENTRIES, UPLOAD_DEADLINE_SECONDS,
+};
 
 /// The only role version 1 supports (spec 4.1).
 pub const ROLE_COMBINED: &str = "combined";
@@ -200,6 +202,7 @@ impl ProductConfig {
                 u64::from(chain.epoch_length),
             ),
             (MapFamily::Chain, None) => unreachable!("validated chain products have parameters"),
+            (MapFamily::Registry, _) => ScopeBinding::registry(genesis, REGISTRY_CHUNK_ENTRIES),
         }
     }
 }
@@ -355,6 +358,15 @@ impl Settings {
                     activation_height,
                     epoch_length,
                 })
+            }
+            MapFamily::Registry => {
+                if self.activation_height.is_some() || self.epoch_length.is_some() {
+                    return Err(
+                        "the registry follows no chain: activation_height and epoch_length do not apply"
+                            .into(),
+                    );
+                }
+                None
             }
         };
         let retain_scopes = match self.retain_scopes {

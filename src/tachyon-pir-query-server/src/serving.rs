@@ -133,6 +133,7 @@ impl ProductState {
             );
             if let Some(info) = info {
                 gauges.anchor_height = info.anchor_height;
+                gauges.log_sequence = info.log_sequence;
                 gauges.newest_scope = info.newest_scope;
                 gauges.entries_total = Some(info.entries_total);
                 gauges.open_scope_entries = Some(info.open_scope_entries);

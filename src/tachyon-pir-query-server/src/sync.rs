@@ -127,10 +127,64 @@ impl SyncTask for Tracked {
     }
 
     fn transient(&self, error: &Self::Error) -> bool {
+        // The distribution `Engine` also retries a pass that lost a race with
+        // a withdrawal at once (`tachyon_pir_distribution::lost_race`, spec 11.6).
         self.engine.transient(error)
     }
 
     async fn wait_until(&mut self, deadline: tokio::time::Instant) {
         self.engine.wait_until(deadline).await
+    }
+}
+
+#[cfg(all(test, feature = "tachygram"))]
+mod tests {
+    use super::*;
+    use pir_sync_manager::publication::PublicationLifecycleError as Lifecycle;
+
+    /// The host's engine retries a pass that lost a race with a withdrawal at
+    /// once, and backs off from anything else (spec 11.6).
+    #[test]
+    fn the_host_engine_retries_lost_races_without_back_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "management_listen": "127.0.0.1:9500",
+            "public_listen": "127.0.0.1:9510",
+            "tachygram": {"enabled": true, "settings": {
+                "publisher": "https://publisher.invalid/",
+                "state_dir": dir.path().join("state"),
+                "role": "combined",
+                "publisher_network": "test",
+                "publisher_genesis": "ab".repeat(32),
+                "activation_height": 8,
+                "epoch_length": 16,
+            }},
+        });
+        let validated = crate::Config::parse(config.to_string().as_bytes())
+            .unwrap()
+            .validate()
+            .unwrap();
+        let product = &validated.products[0];
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let tracked = open(product, ProductState::new(product), pool).unwrap();
+        for retried in [
+            Lifecycle::WithdrawnBeforeCommit,
+            Lifecycle::CandidateInvalidated,
+            Lifecycle::CommitFenced,
+        ] {
+            assert!(tracked.transient(&(Box::new(retried) as Error)));
+        }
+        for failed in [
+            Lifecycle::MalformedEnvelope,
+            Lifecycle::AuthorityResponseMismatch,
+        ] {
+            assert!(!tracked.transient(&(Box::new(failed) as Error)));
+        }
+        assert!(!tracked.transient(&Error::from("table refused: row 3")));
     }
 }

@@ -22,9 +22,11 @@ use tachyon_pir_distribution::{
     ScopeBinding, Subject, TableObjects, publisher::BoxFuture,
 };
 use tachyon_pir_protocol::{
-    BlockHash, Bytes32, ChainMapChunk, ChainMapHead, Entry, FirstContactEntry, KEM_CT_BYTES,
-    MEMO_CT_BYTES, MemoEntry, PROFILE, PirParams, Product, QueryHeader, RecoveryEpoch, Scope,
-    ScopeState, SealedChunkRef, Table, TachygramEntry, map_sha256, query::encode_request,
+    Address, BlockHash, Bytes32, ChainMapChunk, ChainMapHead, Entry, FirstContactEntry,
+    KEM_CT_BYTES, KEM_EK_BYTES, MEMO_CT_BYTES, MemoEntry, PK_BYTES, PROFILE, PirParams, Product,
+    QueryHeader, REGISTRY_CHUNK_ENTRIES, RecoveryEpoch, RegistryEntry, RegistryMapChunk,
+    RegistryMapHead, RegistryScope, Scope, ScopeState, SealedChunkRef, Table, TachygramEntry,
+    map_sha256, query::encode_request,
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 use zakura_pir_client::native::{P8, ProfileClientExt as _};
@@ -41,12 +43,17 @@ pub fn genesis() -> BlockHash {
     BlockHash::from_protocol_bytes([0x5a; 32])
 }
 
-pub fn binding() -> ScopeBinding {
-    ScopeBinding::chain(
-        *genesis().protocol_bytes(),
-        u64::from(ACTIVATION),
-        u64::from(EPOCH),
-    )
+pub fn binding(product: Product) -> ScopeBinding {
+    match product {
+        Product::Registry => {
+            ScopeBinding::registry(*genesis().protocol_bytes(), REGISTRY_CHUNK_ENTRIES)
+        }
+        _ => ScopeBinding::chain(
+            *genesis().protocol_bytes(),
+            u64::from(ACTIVATION),
+            u64::from(EPOCH),
+        ),
+    }
 }
 
 /// The first block of the scope starting at epoch `scope_id`.
@@ -103,7 +110,10 @@ fn entry(product: Product, value: [u8; 32], salt: &[u8], height: u32, ordinal: u
             blk_height: height,
             stamp_ordinal: ordinal,
         }),
-        Product::Registry => unreachable!("registry is not a chain product"),
+        Product::Registry => Entry::Registry(Box::new(RegistryEntry::new(Address {
+            pk: bytes::<PK_BYTES>(&[b"pk", salt]),
+            ek: bytes::<KEM_EK_BYTES>(&[b"ek", salt]),
+        }))),
     }
 }
 
@@ -142,7 +152,10 @@ impl Spec {
 
     /// The entries in ordinal order.
     pub fn entries(&self) -> Vec<Entry> {
-        assert!(self.repeats == 0 || self.product != Product::Tachygram);
+        // Tachygrams are unique; a registry address is logged once.
+        assert!(
+            self.repeats == 0 || !matches!(self.product, Product::Tachygram | Product::Registry)
+        );
         let first = first_height(self.scope_id);
         let repeated = digest(&[b"repeat", &[self.seed], &self.scope_id.to_le_bytes()]);
         let total = self.count + self.repeats;
@@ -346,8 +359,8 @@ fn corrupt(plain: &Fixture) -> Fixture {
 }
 
 /// The publisher's hooks: canonical blocks and head reissue.
-#[derive(Default)]
 pub struct Hooks {
+    pub product: Product,
     pub canonical: Mutex<BTreeMap<u64, [u8; 32]>>,
 }
 
@@ -373,9 +386,16 @@ impl PublisherHooks for Hooks {
         generation: u64,
         recovery_epoch: u64,
     ) -> Result<Vec<u8>, Error> {
+        let epoch = RecoveryEpoch::new(recovery_epoch).ok_or("epoch zero")?;
+        if self.product == Product::Registry {
+            let mut head = RegistryMapHead::parse(head)?;
+            head.generation = generation;
+            head.recovery_epoch = epoch;
+            return Ok(head.to_bytes()?);
+        }
         let mut head = ChainMapHead::parse(head)?;
         head.generation = generation;
-        head.recovery_epoch = RecoveryEpoch::new(recovery_epoch).ok_or("epoch zero")?;
+        head.recovery_epoch = epoch;
         Ok(head.to_bytes()?)
     }
 }
@@ -426,11 +446,14 @@ impl Drop for Publisher {
 
 impl Publisher {
     pub async fn start(product: Product, state_dir: &Path) -> Self {
-        let hooks = Arc::new(Hooks::default());
+        let hooks = Arc::new(Hooks {
+            product,
+            canonical: Mutex::default(),
+        });
         let distribution = Distribution::open(
             state_dir,
             tachyon_pir_distribution::Product::from_name(product.name()).unwrap(),
-            binding(),
+            binding(product),
             hooks.clone(),
             DistributionOptions::default(),
         )
@@ -591,6 +614,101 @@ impl Publisher {
             .unwrap()
     }
 
+    /// Publish registry chunks `0..chunks.len()`: every chunk but the last
+    /// sealed and full, the last open (`None`: no entries). `log_sequence`
+    /// follows from the chunks (spec 10.3).
+    pub fn publish_registry(&self, chunks: &[Option<Arc<Fixture>>]) -> Committed {
+        assert_eq!(self.product, Product::Registry);
+        assert!(!chunks.is_empty() && chunks.len() <= 33);
+        let draft = self.distribution.begin().unwrap();
+        let newest = chunks.len() as u64 - 1;
+        let mut listed = Vec::new();
+        let mut objects = Vec::new();
+        let mut log_sequence = 0;
+        for (index, fixture) in chunks.iter().enumerate() {
+            let chunk_id = index as u64;
+            let open = chunk_id == newest;
+            let (entries, tables) = match fixture {
+                Some(f) => {
+                    assert_eq!(
+                        (f.product, f.scope_id, f.n_buckets),
+                        (self.product, chunk_id, 1)
+                    );
+                    (f.entry_count(), f.tables.clone())
+                }
+                None => (0, Vec::new()),
+            };
+            if !open {
+                assert_eq!(entries, REGISTRY_CHUNK_ENTRIES, "sealed chunks are full");
+            }
+            log_sequence += entries;
+            for table in &tables {
+                objects.push(TableObjects {
+                    scope_index: chunk_id,
+                    session_id: table.table.session_id.0,
+                    rows: self.distribution.install(&table.rows).unwrap(),
+                    public: self.distribution.install(&table.public).unwrap(),
+                });
+            }
+            listed.push(RegistryScope {
+                scope_id: chunk_id,
+                state: if open {
+                    ScopeState::Open
+                } else {
+                    ScopeState::Sealed
+                },
+                entries,
+                n_buckets: 1,
+                tables: tables.into_iter().map(|t| t.table).collect(),
+            });
+        }
+        let open_scopes = vec![listed.pop().unwrap()];
+        let mut sealed_chunks = Vec::new();
+        let mut map_chunks = Vec::new();
+        if !listed.is_empty() {
+            let chunk = RegistryMapChunk {
+                protocol: self.product.protocol().into(),
+                base: 0,
+                scopes: listed,
+            };
+            let bytes = chunk.to_bytes();
+            sealed_chunks.push(SealedChunkRef {
+                base: 0,
+                sha256: map_sha256(&bytes),
+            });
+            map_chunks.push(self.distribution.install(&bytes).unwrap());
+        }
+        let head = RegistryMapHead {
+            protocol: self.product.protocol().into(),
+            profile: PROFILE.into(),
+            network: NETWORK.into(),
+            genesis_hash: genesis(),
+            generation: draft.generation,
+            recovery_epoch: RecoveryEpoch::new(draft.recovery_epoch).unwrap(),
+            log_sequence,
+            floor_scope: 0,
+            sealed_chunks,
+            open_scopes,
+        };
+        head.validate().unwrap();
+        let head = self
+            .distribution
+            .install(&head.to_bytes().unwrap())
+            .unwrap();
+        self.distribution
+            .publish(
+                draft,
+                Contents {
+                    map_head: head,
+                    map_chunks,
+                    newest_scope: newest,
+                    tables: objects,
+                    subject: Subject::Registry { log_sequence },
+                },
+            )
+            .unwrap()
+    }
+
     pub fn head(&self) -> ObjectReference {
         self.distribution
             .current_inventory()
@@ -659,7 +777,17 @@ impl Edge {
     }
 }
 
-/// The settings section of a host following `edge`, as JSON.
+/// The settings section of a registry host following `edge`: no chain
+/// parameters.
+pub fn registry_settings(edge: &Edge, dir: &Path) -> serde_json::Value {
+    let mut value = settings(edge, dir);
+    let object = value.as_object_mut().unwrap();
+    object.remove("activation_height");
+    object.remove("epoch_length");
+    value
+}
+
+/// The settings section of a chain-product host following `edge`, as JSON.
 pub fn settings(edge: &Edge, dir: &Path) -> serde_json::Value {
     std::fs::create_dir_all(dir).unwrap();
     let ca = dir.join("publisher-ca.pem");

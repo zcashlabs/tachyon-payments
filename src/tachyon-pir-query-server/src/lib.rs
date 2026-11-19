@@ -2,8 +2,7 @@
 //! `docs/spec/spec-tachyon-payment-pir.md`, sections 4.1, 10 and 11.5-11.8).
 //!
 //! One process serves every compiled product (Cargo features `memo`,
-//! `first-contact`, `tachygram`, `registry`; `registry` has no serving module
-//! yet) in the `combined` role. Every product shares one
+//! `first-contact`, `tachygram`, `registry`) in the `combined` role. Every product shares one
 //! serving core:
 //!
 //! - [`config`]: the JSON configuration, validated offline (`--check`).
@@ -16,7 +15,7 @@
 //! - [`host`]: discovery preflight, listeners, management, drain.
 //!
 //! A product module ([`product::ProductModule`]: `memo`, `first_contact`,
-//! `tachygram`) is
+//! `tachygram`, `registry`) is
 //! constants only: its section name, metric names, endpoint labels, default
 //! retention and map family.
 
@@ -30,6 +29,8 @@ pub mod memo;
 pub mod metrics;
 pub mod prepare;
 pub mod product;
+#[cfg(feature = "registry")]
+pub mod registry;
 pub mod response;
 pub mod serving;
 pub mod sync;
