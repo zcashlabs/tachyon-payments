@@ -1,0 +1,36 @@
+[package]
+name = "registry-publisher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The registry product's publisher: the write API (challenge, proof of work, pk and ek checks, abuse controls) over registry-store, chunk table publication and its distribution routes (spec sections 9, 10.3 and 11)"
+
+[dependencies]
+# Routers cross into wallet-pir's host library, which is on axum 0.7.
+axum = "0.7"
+getrandom = "0.2"
+hex = "0.4"
+hmac = "0.12"
+pir-control = { workspace = true, features = ["admission"] }
+pir-observability = { workspace = true, features = ["http"] }
+pir-pipeline = { workspace = true }
+pir-publication = { workspace = true }
+registry-store = { path = "../registry-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tachyon-pir-distribution = { path = "../../shared/tachyon-pir-distribution" }
+tachyon-pir-protocol = { path = "../../shared/tachyon-pir-protocol" }
+tachyon-pir-table = { path = "../../shared/tachyon-pir-table" }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The host the publisher binary registers this product with.
+pir-publisher = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
