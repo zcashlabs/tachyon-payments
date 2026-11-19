@@ -550,6 +550,8 @@ CPU only.
   decided by appending an epoch's last block and is removed by any rewind
   below that block. "Covers 64 epochs" means the span reaches 64 epochs at
   that boundary.
+- A publication's span boundaries are those decided by blocks at or below its
+  anchor, and the memo gauges count the envelopes of the same blocks.
 - The span seals `SEAL_DEPTH` blocks after its last block.
 - Readers (query hosts, clients) can check only a span's shape: whole
   consecutive epochs, at most `FC_SPAN_MAX_EPOCHS`. The closing rule depends on
@@ -1188,7 +1190,11 @@ per product over `pir_sync_manager::HttpsSource`.
   without fetching them again (scenario 12).
 - After a failed pass, including a refused object, it retries with
   `pir_pipeline`'s back-off (10 s, doubling, at most 120 s). A refused object
-  therefore delays the switch to the next publication by at least 10 s.
+  therefore delays the switch to the next publication by at least 10 s. A pass
+  that fails only because the publisher withdrew or superseded the publication
+  being synchronized is not a failure of the publisher's bytes: it is retried
+  as a transient condition (about once a second), without back-off, so a reorg
+  does not delay recovery by 10 s.
 - It answers `503` for a product's namespace until that product is ready.
 - While the publisher is unreachable it keeps serving what the last successful
   authority check confirmed, for `max_unconfirmed_seconds` (configuration,
@@ -1273,8 +1279,9 @@ Both binaries accept `--config FILE` and `--check` (validate offline).
 - Product metrics, all prefixed `tachyon_<product>_`:
   `ingested_height`, `anchor_height`, `entries_total`, `open_scope_entries`,
   `segments_overflow_total`, `publication_seconds`, `sessions_revoked_total`.
-  `entries_total`, `open_scope_entries` and `segments_overflow_total` are
-  gauges describing the current publication (the `_total` names count entries
+  `entries_total`, `open_scope_entries` (the sum of `entries` over every scope
+  whose `state` is `open`) and `segments_overflow_total` are gauges describing
+  the current publication (the `_total` names count entries
   and segments in it, not events); `publication_seconds` is a histogram from
   build to commit; `sessions_revoked_total` is a counter of sessions in scopes
   reached by a sealed-scope rewind.
