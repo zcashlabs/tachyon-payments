@@ -1,0 +1,17 @@
+[package]
+name = "registry-store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "The registry product's registration log, registry-v1.sqlite (spec sections 9.2 to 9.4)"
+
+[dependencies]
+# Same version and features as wallet-pir's receiver-store.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Address, digest, BlockHash and REGISTRY_CHUNK_ENTRIES (spec 9.1, 15).
+tachyon-pir-protocol = { path = "../../shared/tachyon-pir-protocol" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
