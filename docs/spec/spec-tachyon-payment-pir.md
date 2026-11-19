@@ -712,6 +712,20 @@ key16  = digest[0..16]
 - Only the last, open chunk is rebuilt at each publication. This is the
   Tachyon Book's size-capped chunking.
 - `n_buckets = 1` always.
+- **Cadence.** The registry has no chain pass. Its publisher runs
+  `pir_pipeline`'s `Publisher` loop: it publishes when the log has grown
+  since the last publication, coalesced to one active and one pending, and at
+  most once per `publish_ms` (configuration, default 1,000). An entry is
+  therefore visible within about `publish_ms` plus one table preparation of
+  its acknowledgement.
+- **Identity.** The registry reads the network identity (chain name, genesis
+  hash) once at start-up from the publisher's chain section; it follows no
+  blocks. Its map's `network` and `genesis_hash`, and its placement hash
+  (section 6.3), use that identity. The registry log binds it, and reopening
+  the log under another identity is refused.
+- **Restart.** As for the chain products (section 11.4), a restart opens a
+  new recovery epoch and republishes the previous publication; the open chunk
+  is rebuilt only if the log grew.
 
 A sender must know which chunk to query. The registration response returns the
 chunk id, and the short address a recipient shares is `(chunk_id, digest)`.
