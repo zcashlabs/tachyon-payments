@@ -721,8 +721,12 @@ key16  = digest[0..16]
 - **Identity.** The registry reads the network identity (chain name, genesis
   hash) once at start-up from the publisher's chain section; it follows no
   blocks. Its map's `network` and `genesis_hash`, and its placement hash
-  (section 6.3), use that identity. The registry log binds it, and reopening
-  the log under another identity is refused.
+  (section 6.3), use that identity. The registry log records the identity and
+  `REGISTRY_CHUNK_ENTRIES`; reopening it under another identity or chunk size
+  is refused.
+- **Consistency.** A publication fixes `log_sequence` first and builds every
+  chunk from the log entries with sequence below it, so registrations that
+  arrive while it is built wait for the next publication.
 - **Restart.** As for the chain products (section 11.4), a restart opens a
   new recovery epoch and republishes the previous publication; the open chunk
   is rebuilt only if the log grew.
@@ -781,7 +785,9 @@ challenge(32) || nonce(8) || addr(1216)
 
 - Registration is idempotent. A repeated address returns its existing
   `chunk_id` with `"created": false`.
-- The response is sent only after the log entry is durable (fsync).
+- The response is sent only after the log entry is durable (fsync). The
+  publisher may group concurrent registrations into one durable commit; each
+  response is sent after that commit.
   `visible_after_sequence` is the entry's log sequence `s` (section 9.4,
   counting from 0). The entry is contained in every registry publication
   whose map has `log_sequence > s`; the publisher publishes such a map at its
@@ -810,8 +816,11 @@ Errors use the common body of section 10.5.
 
 `registry-store` keeps `registry-v1.sqlite`: an append-only table of
 `(sequence, digest, addr)` with a unique index on `digest`. Chunk membership is
-`sequence / REGISTRY_CHUNK_ENTRIES`. A backup of this file is a complete backup
-of the registry.
+`sequence / REGISTRY_CHUNK_ENTRIES`. The log is in WAL mode, so a complete
+backup is a copy of the file taken after `wal_checkpoint(TRUNCATE)` with no
+registration in between, or of the file and its `-wal` together while the
+publisher is stopped. The `challenge-secret` is not registry content;
+restoring without it only invalidates unexpired challenges.
 
 ## 10. Wallet-facing protocol
 
