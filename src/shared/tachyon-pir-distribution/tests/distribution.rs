@@ -8,7 +8,7 @@ use pir_publication::{AuthorityCheckRequest, AuthorityCheckResponse, ObjectRefer
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
 use tachyon_pir_distribution::{
-    Current, ServingPolicy, SessionLookup, Subject, contract::MAX_OPEN_SCOPES,
+    Current, ServingPolicy, SessionLookup, Subject, contract::MAX_OPEN_SCOPES, lost_race,
 };
 
 const LONG: Duration = Duration::from_secs(600);
@@ -338,7 +338,12 @@ async fn corrupt_truncated_or_refused_publications_keep_the_previous_one() {
                 .refuse
                 .store(true, std::sync::atomic::Ordering::SeqCst),
         }
-        assert!(host.poll().await.is_err(), "{fault} publication refused");
+        let error = host.poll().await.unwrap_err();
+        assert!(!lost_race(&error), "{fault}: {error}");
+        assert!(
+            !host.manager.task().transient(&error),
+            "{fault} backs off: {error}"
+        );
         let current = host
             .publications
             .current()
@@ -576,10 +581,12 @@ async fn a_refuted_subject_stops_serving_its_view() {
 
     // The publisher's source reorged; it has not withdrawn yet.
     publisher.hooks.canonical(&[block(100, 2)]);
+    let error = host.poll().await.unwrap_err();
     assert!(
-        host.poll().await.is_err(),
-        "the refuted publication is not taken again"
+        lost_race(&error),
+        "the refuted publication is not taken again: {error}"
     );
+    assert!(host.manager.task().transient(&error));
     assert_eq!(host.status(&a), 503);
 
     publisher.distribution.recover().unwrap();
@@ -704,4 +711,123 @@ async fn an_uncertain_authority_write_recovers_and_reissues_the_head() {
     assert_eq!(report.recovery_epoch, 2);
     assert_eq!(host.found(&a), a.rows());
     assert_eq!(host.found(&f), f.rows());
+}
+
+/// Spec 11.6: a pass that loses a race with a withdrawal (the publisher
+/// withdraws while the pass is fetching, then republishes) is retried as a
+/// transient condition, so the host adopts the new publication within about a
+/// second instead of after the 10 s back-off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withdrawal_during_a_fetch_is_retried_without_back_off() {
+    let (dir, host_dir) = (tempdir(), tempdir());
+    let publisher = Publisher::start(dir.path(), LONG).await;
+    let (a, c, d) = (blob(0, 1), blob(1, 2), blob(1, 3));
+    publisher.publish(&[a], block(130, 1)).unwrap();
+    let edge = Edge::start(publisher.addr).await;
+    let host = Host::start(&edge, host_dir.path(), ServingPolicy::default(), None);
+    let running = host.run(Duration::from_millis(200));
+    running
+        .serves(1, Duration::from_secs(10))
+        .await
+        .expect("first publication serves");
+
+    let hold = Hold::new(rows_ref(&c).sha256);
+    *publisher.observed.hold.lock().unwrap() = Some(hold.clone());
+    publisher.publish(&[a, c], block(131, 1)).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified())
+        .await
+        .expect("the pass fetches the new table");
+    publisher.distribution.withdraw().unwrap();
+    let before = publisher.observed.served_count();
+    hold.release.add_permits(1);
+    // The pass finishes its fetch and loads, then re-observes the withdrawn
+    // envelope and fails: it lost the race, nothing it fetched was refused.
+    publisher.observed.wait_served("current", before).await;
+    let republished = publisher.publish(&[a, d], block(130, 2)).unwrap();
+    assert_eq!(republished.generation, 3);
+    let took = running
+        .serves(3, Duration::from_secs(8))
+        .await
+        .expect("the republished publication serves");
+    assert!(
+        took < Duration::from_secs(3),
+        "adopted after {took:?}, not within ~1 s"
+    );
+    match running.publications.session(&d.session()) {
+        SessionLookup::Found { .. } => {}
+        other => panic!("new table not served: {}", other.status()),
+    }
+}
+
+/// The race the memo end-to-end tests hit: the publisher's source reorged,
+/// so the host's authority check refutes the current publication before the
+/// publisher has withdrawn it, and that pass fails with the candidate
+/// invalidated. It is retried within about a second, so the recovered
+/// publication serves without the 10 s back-off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refuted_publication_race_is_retried_without_back_off() {
+    let (dir, host_dir) = (tempdir(), tempdir());
+    let publisher = Publisher::start(dir.path(), LONG).await;
+    let (a, e) = (blob(0, 1), blob(1, 5));
+    publisher.publish(&[a], block(140, 1)).unwrap();
+    let edge = Edge::start(publisher.addr).await;
+    let host = Host::start(&edge, host_dir.path(), ServingPolicy::default(), None);
+    let running = host.run(Duration::from_millis(200));
+    running
+        .serves(1, Duration::from_secs(10))
+        .await
+        .expect("first publication serves");
+
+    let before = publisher.observed.served_count();
+    publisher.hooks.canonical(&[block(140, 2)]);
+    publisher
+        .observed
+        .wait_served("authority/check", before)
+        .await;
+    publisher.distribution.recover().unwrap();
+    publisher.publish(&[a, e], block(140, 2)).unwrap();
+    let took = running
+        .serves(2, Duration::from_secs(8))
+        .await
+        .expect("the recovered publication serves");
+    assert!(
+        took < Duration::from_secs(3),
+        "adopted after {took:?}, not within ~1 s"
+    );
+}
+
+/// A refused object is still a failure of the publisher's bytes: the next
+/// attempt waits for `pir_pipeline`'s back-off (10 s), even once the object
+/// is served intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupt_object_still_backs_off() {
+    let (dir, host_dir) = (tempdir(), tempdir());
+    let publisher = Publisher::start(dir.path(), LONG).await;
+    let (a, c) = (blob(0, 1), blob(1, 2));
+    publisher.publish(&[a], block(150, 1)).unwrap();
+    let edge = Edge::start(publisher.addr).await;
+    let host = Host::start(&edge, host_dir.path(), ServingPolicy::default(), None);
+    let running = host.run(Duration::from_millis(200));
+    running
+        .serves(1, Duration::from_secs(10))
+        .await
+        .expect("first publication serves");
+
+    let target = rows_ref(&c).sha256;
+    *publisher.observed.fault.lock().unwrap() = Some(Fault::Corrupt(target.clone()));
+    let before = publisher.observed.served_count();
+    publisher.publish(&[a, c], block(151, 1)).unwrap();
+    publisher
+        .observed
+        .wait_served(&format!("objects/{target}"), before)
+        .await;
+    *publisher.observed.fault.lock().unwrap() = None;
+    let took = running
+        .serves(2, Duration::from_secs(16))
+        .await
+        .expect("adopted after the back-off");
+    assert!(
+        took >= Duration::from_secs(9),
+        "a refused object backs off, adopted after {took:?}"
+    );
 }

@@ -124,7 +124,7 @@ let publications = Publications::<MyRuntime>::new(ServingPolicy::default());
 let mut config = FollowerConfig::new(Product::Tachygram, binding, publisher_origin, state_dir);
 config.publisher_ca = Some(pem_bytes);
 config.retain_scopes = Some(64);
-let engine = follow(config, MyPreparer, publications.clone())?;   // ConsumerEngine<EnvelopeConsumer<Follower<_>>>
+let engine = follow(config, MyPreparer, publications.clone())?;   // Engine: a SyncTask over ConsumerEngine<EnvelopeConsumer<Follower<_>>>
 SyncManager::new(engine).with_success_interval(poll).run_until(stop).await;
 match publications.session(&session_id) { SessionLookup::Found { table, publication } => .., _ => .. }
 ```
@@ -167,6 +167,14 @@ Authority and outage rules, following `pir-publication`'s floor:
   started, then answers 503 until a pass confirms again. `SyncManager` retries
   an unreachable publisher every second (it is `transient`) for 90 attempts,
   then backs off.
+- A pass that fails only because the publisher withdrew or superseded the
+  publication it was synchronizing (`lost_race`: the envelope was withdrawn
+  before commit, the floor invalidated the candidate, or a fence was raised
+  while the commit was recording) is retried as transient, about once a
+  second, so a reorg does not delay recovery (spec 11.6). `Engine` is the
+  shared `ConsumerEngine` with only this added to its `SyncTask::transient`.
+  A refused object (digest, length or preparation) or a refusing publisher
+  keeps the 10 s doubling back-off.
 - A host restart serves nothing from local state; it follows the publisher
   again (cached objects are re-verified, not re-fetched). Revocations are
   in-memory, so after a host restart a revoked session answers 409.
@@ -182,6 +190,9 @@ bounded checks, cold bootstrap (and a narrower `retain_scopes` host),
 incremental fetch counted at the server, corrupt/truncated/refused
 publications, withdrawal, outage, publisher restart and restore, sealed-reorg
 revocation (410) versus shallow rewind (409), a refuted subject, retention
-and collection on both sides, and recovery after an uncertain authority write.
+and collection on both sides, recovery after an uncertain authority write,
+and, through the real `SyncManager` loop, passes that lose a race with a
+withdrawal or a refutation (adopted within about a second) against a corrupt
+object (adopted only after the 10 s back-off).
 Table objects are small blobs (`ObjectLimits` with 64-byte rows and 16-byte
 public setups).

@@ -24,7 +24,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub use consumer::{
     Engine, Follower, FollowerConfig, Preparer, Publication, Publications, ServingPolicy,
-    ServingReport, SessionLookup, Table, VerifiedPublication, VerifiedTable, follow,
+    ServingReport, SessionLookup, Table, VerifiedPublication, VerifiedTable, follow, lost_race,
 };
 pub use contract::{
     BlockRef, Current, Descriptor, Inventory, ObjectLimits, Product, ScopeBinding, SessionId,

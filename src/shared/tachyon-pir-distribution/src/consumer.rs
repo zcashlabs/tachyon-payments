@@ -17,6 +17,10 @@
 //!   and absent from the new one, are revoked for the retention window
 //!   ([`SessionLookup::Revoked`], `410`). Any other unknown session is
 //!   [`SessionLookup::Unknown`] (`409`).
+//! - A pass that fails only because the publisher withdrew or superseded the
+//!   publication it was synchronizing is retried as transient, about once a
+//!   second ([`Engine`], [`lost_race`]); a refused object or a refusing
+//!   publisher keeps the 10 s doubling back-off (spec 11.6).
 //! - While the publisher is unreachable the host keeps serving what it last
 //!   confirmed for at most `max_unconfirmed`, then answers `Unavailable`
 //!   until a pass confirms again. Nothing persisted locally ever restores
@@ -29,7 +33,7 @@ use crate::{
     },
 };
 use pir_pipeline::consumer::{
-    ConsumerEngine, ConsumerPass, DeferralReason, PeerHandover, PeerReservation,
+    ConsumerEngine, ConsumerPass, DeferralReason, PeerHandover, PeerReservation, polling::SyncTask,
     reservations::NoPeers,
 };
 use pir_publication::{
@@ -40,7 +44,7 @@ use pir_sync_manager::{
     HttpsSource,
     publication::{
         Envelope, EnvelopeConsumer, ObjectFetcher, PreparedCommit, PublicationAdapter,
-        PublicationPlan, ViewRequirement,
+        PublicationLifecycleError, PublicationPlan, ViewRequirement,
     },
 };
 use std::{
@@ -522,9 +526,75 @@ impl FollowerConfig {
     }
 }
 
-/// The engine a query host runs per product, typically through
-/// `pir_pipeline::consumer::polling::SyncManager`.
-pub type Engine<P> = ConsumerEngine<EnvelopeConsumer<Follower<P>>>;
+/// The engine a query host runs per product through
+/// `pir_pipeline::consumer::polling::SyncManager`: the shared
+/// `ConsumerEngine`, with one change to its retry classification (spec 11.6).
+/// A pass that fails only because the publisher withdrew or superseded the
+/// publication being synchronized ([`lost_race`]) is retried as transient,
+/// about once a second, like an unreachable publisher; every other failure,
+/// including a refused object, keeps `pir_pipeline`'s back-off.
+pub struct Engine<P: Preparer> {
+    inner: ConsumerEngine<EnvelopeConsumer<Follower<P>>>,
+}
+
+impl<P: Preparer> Engine<P> {
+    pub fn inner(&self) -> &ConsumerEngine<EnvelopeConsumer<Follower<P>>> {
+        &self.inner
+    }
+    pub fn inner_mut(&mut self) -> &mut ConsumerEngine<EnvelopeConsumer<Follower<P>>> {
+        &mut self.inner
+    }
+}
+
+impl<P: Preparer> SyncTask for Engine<P> {
+    type Report = ConsumerPass<Option<ServingReport>>;
+    type Error = Error;
+
+    async fn synchronize(&mut self) -> Result<Self::Report, Error> {
+        self.inner.synchronize().await
+    }
+    fn started(&mut self) {
+        self.inner.started();
+    }
+    fn finished(
+        &mut self,
+        result: &Result<Self::Report, Error>,
+        completed: SystemTime,
+        elapsed: Duration,
+    ) {
+        self.inner.finished(result, completed, elapsed);
+    }
+    fn report(&self, result: &Result<Self::Report, Error>) {
+        self.inner.report(result);
+    }
+    fn terminal(&self, error: &Error) -> bool {
+        self.inner.terminal(error)
+    }
+    fn transient(&self, error: &Error) -> bool {
+        self.inner.transient(error) || lost_race(error)
+    }
+    async fn wait_until(&mut self, deadline: tokio::time::Instant) {
+        self.inner.wait_until(deadline).await
+    }
+}
+
+/// Whether a pass failed only because the publication it was synchronizing
+/// stopped being the publisher's authoritative one while the pass ran: the
+/// envelope was withdrawn before commit, the floor invalidated the candidate
+/// (a withdrawal, a new recovery epoch or a refuted subject fenced it), or a
+/// fence was raised while the commit was recording. Nothing about the
+/// publisher's bytes was refused, so the next publication is worth trying at
+/// once. Classified by type, never by message.
+pub fn lost_race(error: &Error) -> bool {
+    matches!(
+        error.downcast_ref::<PublicationLifecycleError>(),
+        Some(
+            PublicationLifecycleError::WithdrawnBeforeCommit
+                | PublicationLifecycleError::CandidateInvalidated
+                | PublicationLifecycleError::CommitFenced
+        )
+    )
+}
 
 /// Open the product's floor and object cache under `state_dir` and build its
 /// consumer engine over `HttpsSource`.
@@ -565,7 +635,9 @@ pub fn follow<P: Preparer>(
         prepared: HashMap::new(),
         check_started: None,
     };
-    EnvelopeConsumer::open(follower, source, floor, cache)
+    Ok(Engine {
+        inner: EnvelopeConsumer::open(follower, source, floor, cache)?,
+    })
 }
 
 /// The product adapter the consumer engine drives.

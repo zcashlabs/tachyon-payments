@@ -150,11 +150,56 @@ pub enum Fault {
 pub struct Observed {
     pub object_gets: Mutex<Vec<String>>,
     pub fault: Mutex<Option<Fault>>,
+    /// Requests whose response has been produced, in order, as paths
+    /// relative to the product prefix (`current`, `objects/<sha>`, ...).
+    pub served: Mutex<Vec<String>>,
+    pub served_changed: tokio::sync::Notify,
+    pub hold: Mutex<Option<Hold>>,
+}
+
+/// Hold one object's request before the publisher answers it, so a test can
+/// change the publication while a consumer pass is mid-fetch.
+#[derive(Clone)]
+pub struct Hold {
+    pub sha256: String,
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Semaphore>,
+}
+
+impl Hold {
+    pub fn new(sha256: String) -> Self {
+        Self {
+            sha256,
+            entered: Arc::default(),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
 }
 
 impl Observed {
     pub fn take_gets(&self) -> Vec<String> {
         std::mem::take(&mut *self.object_gets.lock().unwrap())
+    }
+
+    /// Wait until a response for `path` is produced after the first `after`
+    /// served requests; returns the new served count.
+    pub async fn wait_served(&self, path: &str, after: usize) -> usize {
+        loop {
+            let changed = self.served_changed.notified();
+            {
+                let served = self.served.lock().unwrap();
+                if let Some(at) = served.iter().skip(after).position(|p| p == path) {
+                    return after + at + 1;
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(10), changed)
+                .await
+                .unwrap_or_else(|_| panic!("no response for {path} within 10 s"));
+        }
+    }
+
+    pub fn served_count(&self) -> usize {
+        self.served.lock().unwrap().len()
     }
 }
 
@@ -165,8 +210,23 @@ async fn observe(State(observed): State<Arc<Observed>>, request: Request, next: 
         .map(str::to_string);
     if let Some(id) = &object {
         observed.object_gets.lock().unwrap().push(id.clone());
+        let hold = observed.hold.lock().unwrap().clone();
+        if let Some(hold) = hold.filter(|hold| &hold.sha256 == id) {
+            hold.entered.notify_one();
+            hold.release.acquire().await.unwrap().forget();
+        }
     }
-    let response = next.run(request).await;
+    let relative = path
+        .strip_prefix(PRODUCT.prefix())
+        .unwrap_or(&path)
+        .to_string();
+    let response = faulted(&observed, object, next.run(request).await).await;
+    observed.served.lock().unwrap().push(relative);
+    observed.served_changed.notify_waiters();
+    response
+}
+
+async fn faulted(observed: &Observed, object: Option<String>, response: Response) -> Response {
     let fault = observed.fault.lock().unwrap().clone();
     let target = match (&fault, &object) {
         (Some(Fault::Corrupt(sha)), Some(id)) | (Some(Fault::Truncate(sha)), Some(id))
@@ -490,6 +550,24 @@ impl Host {
         }
     }
 
+    /// Run the real `SyncManager` loop in the background, with its transient
+    /// retry and failure back-off, until the returned handle is dropped.
+    pub fn run(self, success_interval: Duration) -> Running {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let manager = self.manager.with_success_interval(success_interval);
+        let task = tokio::spawn({
+            let stop = stop.clone();
+            async move {
+                manager.run_until(stop.notified()).await;
+            }
+        });
+        Running {
+            publications: self.publications,
+            stop,
+            task,
+        }
+    }
+
     pub async fn poll(&mut self) -> Result<ConsumerPass<Option<ServingReport>>, Error> {
         self.manager.poll_once().await
     }
@@ -555,4 +633,36 @@ pub async fn get(url: &str, if_none_match: Option<&str>) -> reqwest::Response {
         request = request.header(header::IF_NONE_MATCH.as_str(), tag);
     }
     request.send().await.unwrap()
+}
+
+/// A host following its publisher in the background.
+pub struct Running {
+    pub publications: Publications<Runtime>,
+    stop: Arc<tokio::sync::Notify>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop.notify_one();
+        self.task.abort();
+    }
+}
+
+impl Running {
+    /// Wait until `generation` serves, up to `limit`; returns how long it took.
+    pub async fn serves(&self, generation: u64, limit: Duration) -> Option<Duration> {
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < limit {
+            if self
+                .publications
+                .current()
+                .is_some_and(|p| p.generation() == generation)
+            {
+                return Some(started.elapsed());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
 }
