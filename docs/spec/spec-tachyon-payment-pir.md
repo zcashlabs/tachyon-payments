@@ -743,7 +743,9 @@ at `/registry/v1` with legacy alias `/v1/registry`. That listener is private
 (section 11.7), so a reverse proxy exposes the write API publicly. The proxy
 MUST overwrite `X-Forwarded-For` with the connecting client's address; the
 per-client controls below key on that header (through `pir_control`'s client
-key) and fall back to the peer address when it is absent.
+key) and fall back to the peer address when the host exposes it. Behind
+`pir_publisher::run_registered`, which serves without connect info, requests
+without the header share one client key, which is why the proxy is required.
 
 `GET /registry/v1/challenge`
 
@@ -799,7 +801,7 @@ Abuse controls:
 | Control | Value | Configuration (`registry.settings`) |
 |---|---|---|
 | Proof of work | default 20 bits | `difficulty_bits` |
-| Per-client concurrent registrations | 2 (`pir_control::ClientSlots`); above it `429` | `per_client_concurrent` |
+| Per-client concurrent registrations | 2 (`pir_control::ClientSlots`); above it `429` with `Retry-After: 1` | `per_client_concurrent` |
 | Per-client rate | 6 per minute; above it `429` with `Retry-After` | `per_client_per_minute` |
 | Body limit | 1,256 bytes exactly; shorter `400`, longer `413` | fixed |
 | Upload deadline | 15 s, then `408` | `upload_ms` (default 15,000) |
@@ -807,8 +809,12 @@ Abuse controls:
 
 Rates are counted over a sliding 60-second window of accepted-for-processing
 requests; `Retry-After` is the whole number of seconds until the window admits
-the client again, at least 1. A refused request does not count against the
-rate. The challenge route is not rate-limited beyond the global cap.
+the client again, at least 1. A request refused by these controls does not
+count against the rate; a request admitted and then refused for its body
+does. The global window counts every accepted request to either route; the
+challenge route is subject to no other control. Unknown routes are `404` and
+wrong methods `405`, both with an `invalid_request` body; a log that cannot be
+written is `503` `temporarily_unavailable` with `Retry-After: 1`.
 
 Errors use the common body of section 10.5.
 
