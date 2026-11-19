@@ -8,8 +8,11 @@
 //! ```
 //!
 //! [`PublisherHost`] and [`QueryHost`] are the two spawned hosts with their
-//! configurations (spec 11.7); [`Topology`] strings them together for one
-//! product. Nothing here knows a product's tables: the helpers read the
+//! configurations (spec 11.7), each hosting one or more products (memo and
+//! first-contact share one publisher definition and listener);
+//! [`Topology`] strings them together for the product under test.
+//! [`Distribution`] reads one product's distribution routes on the
+//! publisher. Nothing here knows a product's tables: the helpers read the
 //! publisher's distribution routes and the query host's public and management
 //! listeners only.
 use crate::budget::Budget;
@@ -29,7 +32,7 @@ use std::time::{Duration, Instant};
 use tachyon_fixtures::{NodeDouble, SyntheticChain, display};
 use tachyon_pir_cli::{Client, ClientError, MapHead, MapView};
 use tachyon_pir_distribution::{Current, Inventory, Subject};
-use tachyon_pir_protocol::{ChainMapHead, Product};
+use tachyon_pir_protocol::{ChainMapHead, Product, Scope};
 
 /// How often the waits below poll.
 pub const POLL: Duration = Duration::from_millis(50);
@@ -86,25 +89,67 @@ impl ProductNames {
         product: Product::Tachygram,
     };
 
+    pub const MEMO: ProductNames = ProductNames {
+        section: "memo",
+        product: Product::Memo,
+    };
+
+    /// First-contact runs inside the memo publisher definition: it shares
+    /// the memo listener and state directory and has empty settings
+    /// (spec 11.7).
+    pub const FIRST_CONTACT: ProductNames = ProductNames {
+        section: "first_contact",
+        product: Product::FirstContact,
+    };
+
+    /// The names of `product` (registry has no host support here).
+    pub fn of(product: Product) -> Self {
+        match product {
+            Product::Tachygram => Self::TACHYGRAM,
+            Product::Memo => Self::MEMO,
+            Product::FirstContact => Self::FIRST_CONTACT,
+            Product::Registry => panic!("the registry is not a chain product of this harness"),
+        }
+    }
+
+    /// The products a publisher must enable to publish `self`: memo and
+    /// first-contact are one definition, so either enables both.
+    pub fn publisher_family(&self) -> Vec<ProductNames> {
+        match self.product {
+            Product::Memo | Product::FirstContact => vec![Self::MEMO, Self::FIRST_CONTACT],
+            _ => vec![*self],
+        }
+    }
+
+    /// Whether the product is hosted on another product's listener and
+    /// state directory (first-contact on memo's).
+    fn shares_memo_definition(&self) -> bool {
+        self.product == Product::FirstContact
+    }
+
     /// `/provider/<product>/v1/` (spec 11.3).
     pub fn distribution_prefix(&self) -> &'static str {
         self.product.distribution_prefix()
     }
 }
 
-/// The publisher binary with one product enabled, on fixed reserved ports.
+/// The publisher binary with one or more products enabled, on fixed reserved
+/// ports: one listener per publisher definition (memo and first-contact share
+/// the memo listener, spec 11.7).
 pub struct PublisherHost {
     process: Process,
+    /// The product the single-product accessors ([`PublisherHost::current`],
+    /// [`PublisherHost::listen`], ..) read: the first one started.
     product: ProductNames,
     management: SocketAddr,
-    listen: SocketAddr,
-    state_dir: PathBuf,
+    /// Each enabled product with its listener and state directory.
+    products: Vec<(ProductNames, SocketAddr, PathBuf)>,
 }
 
 impl PublisherHost {
-    /// Configures (spec 11.7) and starts `binary` following `rpc_url` with
-    /// `epoch_length`-block epochs and a `poll_ms` tip poll, and waits up to
-    /// `timeout` for `/ready`.
+    /// Configures (spec 11.7) and starts `binary` with `product` enabled,
+    /// following `rpc_url` with `epoch_length`-block epochs and a `poll_ms`
+    /// tip poll, and waits up to `timeout` for `/ready`.
     pub async fn start(
         binary: PathBuf,
         product: ProductNames,
@@ -113,10 +158,39 @@ impl PublisherHost {
         poll_ms: u64,
         timeout: Duration,
     ) -> Self {
+        Self::start_products(binary, &[product], rpc_url, epoch_length, poll_ms, timeout).await
+    }
+
+    /// [`PublisherHost::start`] with every product of `products` enabled.
+    /// Each gets its own listener and state directory, except first-contact,
+    /// which needs memo and is configured with empty settings on memo's
+    /// listener and state directory (spec 11.7).
+    pub async fn start_products(
+        binary: PathBuf,
+        products: &[ProductNames],
+        rpc_url: &str,
+        epoch_length: u32,
+        poll_ms: u64,
+        timeout: Duration,
+    ) -> Self {
+        assert!(
+            !products.is_empty(),
+            "a publisher hosts at least one product"
+        );
         let mut process = Process::new("publisher", binary);
-        let ports = free_addrs(2);
-        let (management, listen) = (ports[0], ports[1]);
-        let state_dir = process.state_dir(product.section);
+        let definitions: Vec<ProductNames> = products
+            .iter()
+            .copied()
+            .filter(|p| !p.shares_memo_definition())
+            .collect();
+        if products.iter().any(ProductNames::shares_memo_definition) {
+            assert!(
+                definitions.contains(&ProductNames::MEMO),
+                "first-contact runs inside the memo publisher (spec 11.7)"
+            );
+        }
+        let ports = free_addrs(1 + definitions.len());
+        let management = ports[0];
         let mut config = Map::new();
         config.insert("management_listen".into(), json!(management.to_string()));
         config.insert(
@@ -124,19 +198,35 @@ impl PublisherHost {
             json!({"rpc_url": rpc_url, "no_auth": true, "poll_ms": poll_ms,
                    "epoch_length": epoch_length}),
         );
-        config.insert(
-            product.section.into(),
-            json!({"enabled": true,
-                   "settings": {"listen": listen.to_string(), "state_dir": state_dir}}),
-        );
+        let mut hosted = Vec::new();
+        for (definition, listen) in definitions.iter().zip(&ports[1..]) {
+            let state_dir = process.state_dir(definition.section);
+            config.insert(
+                definition.section.into(),
+                json!({"enabled": true,
+                       "settings": {"listen": listen.to_string(), "state_dir": state_dir}}),
+            );
+            hosted.push((*definition, *listen, state_dir));
+        }
+        for product in products.iter().filter(|p| p.shares_memo_definition()) {
+            let (_, listen, state_dir) = hosted
+                .iter()
+                .find(|(p, ..)| *p == ProductNames::MEMO)
+                .cloned()
+                .expect("memo is hosted");
+            config.insert(
+                product.section.into(),
+                json!({"enabled": true, "settings": {}}),
+            );
+            hosted.push((*product, listen, state_dir));
+        }
         process.config("--config", "publisher.json", &Value::Object(config));
         process.start();
         let mut host = Self {
             process,
-            product,
+            product: products[0],
             management,
-            listen,
-            state_dir,
+            products: hosted,
         };
         host.wait_ready(timeout).await;
         host
@@ -151,13 +241,31 @@ impl PublisherHost {
         self.management
     }
 
-    /// The product listener (distribution prefix and `/metrics`).
-    pub fn listen(&self) -> SocketAddr {
-        self.listen
+    /// The products this publisher hosts.
+    pub fn products(&self) -> Vec<ProductNames> {
+        self.products.iter().map(|(p, ..)| *p).collect()
     }
 
+    fn hosted(&self, product: ProductNames) -> &(ProductNames, SocketAddr, PathBuf) {
+        self.products
+            .iter()
+            .find(|(p, ..)| *p == product)
+            .unwrap_or_else(|| panic!("the publisher does not host {}", product.section))
+    }
+
+    /// The first product's listener (distribution prefix and `/metrics`).
+    pub fn listen(&self) -> SocketAddr {
+        self.listen_of(self.product)
+    }
+
+    /// The listener serving `product`'s distribution prefix.
+    pub fn listen_of(&self, product: ProductNames) -> SocketAddr {
+        self.hosted(product).1
+    }
+
+    /// The first product's state directory.
     pub fn state_dir(&self) -> &Path {
-        &self.state_dir
+        &self.hosted(self.product).2
     }
 
     pub async fn wait_ready(&mut self, timeout: Duration) {
@@ -173,6 +281,91 @@ impl PublisherHost {
         self.wait_ready(timeout).await;
     }
 
+    /// The distribution routes of `product`, read directly from its listener
+    /// (not through the edge, so edge counts stay the query host's).
+    pub fn distribution(&self, product: ProductNames) -> Distribution {
+        Distribution {
+            listen: self.listen_of(product),
+            product,
+        }
+    }
+
+    fn primary(&self) -> Distribution {
+        self.distribution(self.product)
+    }
+
+    /// `GET <prefix>current` of the first product.
+    pub async fn current(&self) -> Current {
+        self.primary().current().await
+    }
+
+    /// `GET <prefix>objects/<sha256>` of the first product.
+    pub async fn object(&self, sha256: &str) -> bytes::Bytes {
+        self.primary().object(sha256).await
+    }
+
+    /// The first product's current publication; `None` while nothing is
+    /// published.
+    pub async fn inventory(&self) -> Option<Publication> {
+        self.primary().inventory().await
+    }
+
+    /// The first product's current map head.
+    pub async fn chain_map_head(&self) -> Option<ChainMapHead> {
+        self.primary().chain_map_head().await
+    }
+
+    /// Waits until the first product's current publication satisfies
+    /// `accept`.
+    pub async fn wait_publication(
+        &self,
+        what: &str,
+        timeout: Duration,
+        accept: impl Fn(&Publication) -> bool,
+    ) -> Publication {
+        self.primary().wait_publication(what, timeout, accept).await
+    }
+
+    /// Waits until the first product's publication is anchored at `height`
+    /// with `hash` (see [`Distribution::wait_anchor`]).
+    pub async fn wait_anchor(&self, height: u64, hash: [u8; 32], timeout: Duration) -> Publication {
+        self.primary().wait_anchor(height, hash, timeout).await
+    }
+
+    /// `GET /metrics` on the first product's listener.
+    pub async fn metrics(&self) -> String {
+        self.primary().metrics().await
+    }
+
+    /// One value of `/metrics` on `product`'s listener (exact series name
+    /// with labels).
+    pub async fn metric(&self, product: ProductNames, series: &str) -> Option<f64> {
+        metric_value(&self.distribution(product).metrics().await, series)
+    }
+}
+
+/// One value of a Prometheus text exposition (exact series name with
+/// labels).
+pub fn metric_value(text: &str, series: &str) -> Option<f64> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.rsplit_once(' ')?;
+        (name == series).then(|| value.parse().ok()).flatten()
+    })
+}
+
+/// One product's distribution routes on a publisher listener
+/// (`/provider/<product>/v1/...`, spec 11.3) and that listener's `/metrics`.
+#[derive(Clone, Copy, Debug)]
+pub struct Distribution {
+    listen: SocketAddr,
+    product: ProductNames,
+}
+
+impl Distribution {
+    pub fn product(&self) -> ProductNames {
+        self.product
+    }
+
     fn url(&self, route: &str) -> String {
         format!(
             "http://{}{}{route}",
@@ -181,8 +374,7 @@ impl PublisherHost {
         )
     }
 
-    /// `GET <prefix>current`, read directly from the product listener (not
-    /// through the edge, so edge counts stay the query host's).
+    /// `GET <prefix>current`.
     pub async fn current(&self) -> Current {
         client::get_json(&client::plain(), &self.url("current"), StatusCode::OK).await
     }
@@ -220,6 +412,32 @@ impl PublisherHost {
         Some(ChainMapHead::parse(&bytes).expect("the published map head parses"))
     }
 
+    /// The current publication's map head and its whole scope listing, from
+    /// index 0 (sealed scopes from every map chunk, then the open scopes),
+    /// each chunk checked against the head (spec 10.3).
+    pub async fn chain_listing(&self) -> Option<(ChainMapHead, Vec<Scope>)> {
+        let publication = self.inventory().await?;
+        let bytes = self.object(&publication.inventory.map_head.sha256).await;
+        let head = ChainMapHead::parse(&bytes).expect("the published map head parses");
+        let product = self.product.product;
+        head.validate(product)
+            .expect("the published map head is valid");
+        let mut scopes = Vec::new();
+        let mut chunks = Vec::new();
+        for (position, reference) in head.sealed_chunks.iter().enumerate() {
+            let bytes = self.object(&hex::encode(reference.sha256.0)).await;
+            let chunk = head
+                .parse_chunk(product, position, &bytes)
+                .unwrap_or_else(|error| panic!("published map chunk {position}: {error}"));
+            scopes.extend(chunk.scopes.iter().cloned());
+            chunks.push(chunk);
+        }
+        head.check_listing(product, &chunks)
+            .expect("the published listing is consistent");
+        scopes.extend(head.open_scopes.iter().cloned());
+        Some((head, scopes))
+    }
+
     /// Waits until the current publication satisfies `accept`.
     pub async fn wait_publication(
         &self,
@@ -247,7 +465,10 @@ impl PublisherHost {
     /// up with a node whose tip is `height + CONFIRMATION_DEPTH`.
     pub async fn wait_anchor(&self, height: u64, hash: [u8; 32], timeout: Duration) -> Publication {
         self.wait_publication(
-            &format!("the publisher to publish anchor {height}"),
+            &format!(
+                "the publisher to publish {} anchor {height}",
+                self.product.product.name()
+            ),
             timeout,
             |p| {
                 matches!(&p.inventory.subject,
@@ -257,7 +478,7 @@ impl PublisherHost {
         .await
     }
 
-    /// `GET /metrics` on the product listener.
+    /// `GET /metrics` on the listener.
     pub async fn metrics(&self) -> String {
         let url = format!("http://{}/metrics", self.listen);
         client::get(&client::plain(), &url)
@@ -322,13 +543,17 @@ impl ChainIdentity {
     }
 }
 
-/// The query-server binary serving one product from a publisher origin.
+/// The query-server binary serving one or more products from a publisher
+/// origin, all on one public listener (spec 11.7).
 pub struct QueryHost {
     process: Process,
+    /// The product the single-product accessors ([`QueryHost::wallet`],
+    /// [`QueryHost::public_get`], ..) use: the first one configured.
     product: ProductNames,
     management: SocketAddr,
     public: SocketAddr,
-    state_dir: PathBuf,
+    /// Each served product with its own state directory.
+    products: Vec<(ProductNames, PathBuf)>,
 }
 
 impl QueryHost {
@@ -344,38 +569,59 @@ impl QueryHost {
         chain: &ChainIdentity,
         extra: &Map<String, Value>,
     ) -> Self {
+        Self::configure_products(binary, &[product], publisher, publisher_ca, chain, extra)
+    }
+
+    /// [`QueryHost::configure`] with every product of `products` enabled,
+    /// each with its own state directory and the same `extra` settings.
+    pub fn configure_products(
+        binary: PathBuf,
+        products: &[ProductNames],
+        publisher: &str,
+        publisher_ca: &Path,
+        chain: &ChainIdentity,
+        extra: &Map<String, Value>,
+    ) -> Self {
+        assert!(
+            !products.is_empty(),
+            "a query host serves at least one product"
+        );
         let mut process = Process::new("query", binary);
         let ports = free_addrs(2);
         let (management, public) = (ports[0], ports[1]);
-        let state_dir = process.state_dir(product.section);
-        let mut settings = json!({
-            "publisher": publisher,
-            "state_dir": state_dir,
-            "publisher_ca": publisher_ca,
-            "role": "combined",
-            "publisher_network": chain.network,
-            "publisher_genesis": chain.genesis,
-            "activation_height": chain.activation_height,
-            "epoch_length": chain.epoch_length,
-        });
-        let object = settings.as_object_mut().expect("settings object");
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
         let mut config = Map::new();
         config.insert("management_listen".into(), json!(management.to_string()));
         config.insert("public_listen".into(), json!(public.to_string()));
-        config.insert(
-            product.section.into(),
-            json!({"enabled": true, "settings": settings}),
-        );
+        let mut served = Vec::new();
+        for product in products {
+            let state_dir = process.state_dir(product.section);
+            let mut settings = json!({
+                "publisher": publisher,
+                "state_dir": state_dir,
+                "publisher_ca": publisher_ca,
+                "role": "combined",
+                "publisher_network": chain.network,
+                "publisher_genesis": chain.genesis,
+                "activation_height": chain.activation_height,
+                "epoch_length": chain.epoch_length,
+            });
+            let object = settings.as_object_mut().expect("settings object");
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+            config.insert(
+                product.section.into(),
+                json!({"enabled": true, "settings": settings}),
+            );
+            served.push((*product, state_dir));
+        }
         process.config("--config", "query.json", &Value::Object(config));
         Self {
             process,
-            product,
+            product: products[0],
             management,
             public,
-            state_dir,
+            products: served,
         }
     }
 
@@ -391,8 +637,24 @@ impl QueryHost {
         self.public
     }
 
+    /// The products this host serves.
+    pub fn products(&self) -> Vec<ProductNames> {
+        self.products.iter().map(|(p, _)| *p).collect()
+    }
+
+    /// The first product's state directory.
     pub fn state_dir(&self) -> &Path {
-        &self.state_dir
+        self.state_dir_of(self.product)
+    }
+
+    /// `product`'s state directory.
+    pub fn state_dir_of(&self, product: ProductNames) -> &Path {
+        &self
+            .products
+            .iter()
+            .find(|(p, _)| *p == product)
+            .unwrap_or_else(|| panic!("the query host does not serve {}", product.section))
+            .1
     }
 
     /// `http://<public_listen>`: the wallet's origin.
@@ -426,11 +688,17 @@ impl QueryHost {
         .await
     }
 
-    /// `GET <public>/<mount>/<route>`, whatever the status.
+    /// `GET <public>/<mount>/<route>` of the first product, whatever the
+    /// status.
     pub async fn public_get(&self, route: &str) -> Reply {
+        self.public_get_of(self.product, route).await
+    }
+
+    /// `GET <public>/<mount>/<route>` of `product`, whatever the status.
+    pub async fn public_get_of(&self, product: ProductNames, route: &str) -> Reply {
         client::get(
             &client::plain(),
-            &format!("{}{}/{route}", self.origin(), self.product.product.mount()),
+            &format!("{}{}/{route}", self.origin(), product.product.mount()),
         )
         .await
     }
@@ -440,16 +708,19 @@ impl QueryHost {
     pub async fn metric(&self, series: &str) -> Option<f64> {
         let reply = self.management_get("metrics").await;
         reply.assert_status(StatusCode::OK, "/metrics");
-        reply.text().lines().find_map(|line| {
-            let (name, value) = line.rsplit_once(' ')?;
-            (name == series).then(|| value.parse().ok()).flatten()
-        })
+        metric_value(&reply.text(), series)
     }
 
-    /// A probe client (the wallet) on the canonical mount.
+    /// A probe client (the wallet) of the first product on its canonical
+    /// mount.
     pub fn wallet(&self) -> Arc<Client> {
+        self.wallet_for(self.product)
+    }
+
+    /// A probe client (the wallet) of `product` on its canonical mount.
+    pub fn wallet_for(&self, product: ProductNames) -> Arc<Client> {
         Arc::new(
-            Client::new(&self.origin(), self.product.product, None)
+            Client::new(&self.origin(), product.product, None)
                 .expect("a client for the public listener"),
         )
     }
@@ -497,7 +768,14 @@ pub fn describe(error: &ClientError) -> String {
 /// What a product test sets up.
 #[derive(Clone, Debug)]
 pub struct TopologyOptions {
+    /// The product under test: the first product of both hosts, the one
+    /// [`Topology::prefix`], [`QueryHost::wallet`] and the single-product
+    /// [`PublisherHost`] accessors address.
     pub product: ProductNames,
+    /// Every product the publisher hosts, `product` first.
+    pub publish: Vec<ProductNames>,
+    /// Every product the query host serves, `product` first.
+    pub serve: Vec<ProductNames>,
     pub epoch_length: u32,
     /// The publisher's tip poll interval.
     pub chain_poll_ms: u64,
@@ -508,7 +786,9 @@ pub struct TopologyOptions {
 
 impl TopologyOptions {
     /// `product` with `epoch_length`-block epochs, fast polling on both sides
-    /// and admission wide enough for a test's parallel lookups.
+    /// and admission wide enough for a test's parallel lookups. The
+    /// publisher hosts the product's whole definition (memo and
+    /// first-contact together, spec 11.7); the query host serves `product`.
     pub fn new(product: ProductNames, epoch_length: u32) -> Self {
         let mut query_settings = Map::new();
         query_settings.insert("poll_ms".into(), json!(100));
@@ -516,8 +796,17 @@ impl TopologyOptions {
             "admission".into(),
             json!({"executing": 4, "waiting": 64, "wait_ms": 5000, "per_client": 16}),
         );
+        let mut publish = vec![product];
+        publish.extend(
+            product
+                .publisher_family()
+                .into_iter()
+                .filter(|p| *p != product),
+        );
         Self {
             product,
+            publish,
+            serve: vec![product],
             epoch_length,
             chain_poll_ms: 50,
             query_settings,
@@ -527,6 +816,15 @@ impl TopologyOptions {
     /// Sets one query-host product setting.
     pub fn query_setting(mut self, key: &str, value: Value) -> Self {
         self.query_settings.insert(key.into(), value);
+        self
+    }
+
+    /// The query host also serves `product` (same settings, its own state
+    /// directory).
+    pub fn also_serve(mut self, product: ProductNames) -> Self {
+        if !self.serve.contains(&product) {
+            self.serve.push(product);
+        }
         self
     }
 }
@@ -543,9 +841,10 @@ pub struct Topology {
 
 impl Topology {
     /// Serves `chain` from an in-process node double, starts the publisher
-    /// (waiting for its `/ready`), puts the TLS edge in front of it
-    /// (discovery to management, the product prefix to the product listener)
-    /// and configures the query host against the edge. The query host is not
+    /// with `options.publish` (waiting for its `/ready`), puts the TLS edge in
+    /// front of it (discovery to management, each product prefix to that
+    /// product's listener) and configures the query host for
+    /// `options.serve` against the edge. The query host is not
     /// started.
     pub async fn launch(
         chain: SyntheticChain,
@@ -556,27 +855,26 @@ impl Topology {
     ) -> Self {
         let identity = ChainIdentity::of(&chain, options.epoch_length);
         let node = start_node(chain).await;
-        let publisher = PublisherHost::start(
+        let publisher = PublisherHost::start_products(
             publisher_binary,
-            options.product,
+            &options.publish,
             &node.url(),
             options.epoch_length,
             options.chain_poll_ms,
             wait_limit(budget),
         )
         .await;
-        let edge = TlsEdge::builder()
-            .management(publisher.management().to_string())
-            .product(
-                options.product.product.name(),
-                publisher.listen().to_string(),
-            )
-            .start()
-            .await
-            .expect("start the TLS edge");
-        let query = QueryHost::configure(
+        let mut edge = TlsEdge::builder().management(publisher.management().to_string());
+        for product in &options.publish {
+            edge = edge.product(
+                product.product.name(),
+                publisher.listen_of(*product).to_string(),
+            );
+        }
+        let edge = edge.start().await.expect("start the TLS edge");
+        let query = QueryHost::configure_products(
             query_binary,
-            options.product,
+            &options.serve,
             &edge.origin(),
             edge.ca_path(),
             &identity,
@@ -614,5 +912,10 @@ impl Topology {
     /// The distribution prefix of the product, for edge paths.
     pub fn prefix(&self) -> &'static str {
         self.options.product.distribution_prefix()
+    }
+
+    /// The publisher's distribution routes of the product under test.
+    pub fn distribution(&self) -> Distribution {
+        self.publisher.distribution(self.options.product)
     }
 }

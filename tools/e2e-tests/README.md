@@ -3,17 +3,19 @@
 End-to-end tests across real HTTP boundaries (spec sections 4.1 and 13.1), and
 the harness they are written with: the harness library (`src/`), its own tests
 (`tests/harness.rs`) and the product acceptance suites (`tests/tachygram.rs`,
-spec 13.2).
+`tests/memo.rs`, `tests/first_contact.rs`; spec 13.2).
 
 ## Features
 
 | Feature | Default | Effect |
 |---|---|---|
 | `tachygram` | on | builds the re-declared hosts with `tachyon-pir-publisher/tachygram` and `tachyon-pir-query-server/tachygram`, and enables `tests/tachygram.rs` (`required-features`) |
+| `memo` | on | the same with `tachyon-pir-publisher/memo` and `tachyon-pir-query-server/memo`; `tests/memo.rs` needs `memo` and `first-contact` |
+| `first-contact` | on | implies `memo` (first-contact runs inside the memo publisher, spec 11.7); adds both hosts' `first-contact` and enables `tests/first_contact.rs` |
 
-`tachygram` is a default feature, so `cargo test --workspace` runs the tachygram
-acceptance scenarios. A later product gets a feature of its own, built the same
-way.
+Every product feature is a default, so `cargo test --workspace` runs every
+product's acceptance scenarios. A later product (registry) gets a feature of
+its own, built the same way.
 
 ## Topology a product test builds
 
@@ -27,6 +29,12 @@ Each piece is a separate process or listener, joined only by real HTTP(S).
 The oracle is computed from the chain the test authored (the `SyntheticChain`
 or `ChainSpec` the node double serves), never from the publisher's tables.
 
+For memo and first-contact the publisher runs **one** definition with both
+products enabled: one listener serves `/provider/memo/v1/`,
+`/provider/first-contact/v1/` and `/metrics`, and the edge maps both prefixes
+to it (`TopologyOptions::new` with either product sets `publish` to both). The query host serves the product under test, or several
+(`also_serve`), each with its own state directory.
+
 ## Modules
 
 | Module | What it gives a test |
@@ -36,8 +44,10 @@ or `ChainSpec` the node double serves), never from the publisher's tables.
 | `node` | `start_node` (in-process `NodeDouble`), `SpawnedNode` (the binary from a `ChainSpec`), `rpc` |
 | `client` | `trusting(pem)`, `plain()`, `get`, `get_json`, `get_bytes`, `post_bytes`, `post_octets`, `post_json`, `Reply` |
 | `budget` | `budget::e2e(async { .. })`, `Budget`: the 25 s wall-clock guard |
-| `topology` | `Topology` (node double, publisher, TLS edge and query host of one product, from `TopologyOptions`), `PublisherHost`, `QueryHost`, `wait_for`, `wait_map`, `wait_limit`, `exclusive` |
+| `topology` | `Topology` (node double, publisher, TLS edge and query host of the product under test, from `TopologyOptions`), `PublisherHost` and `QueryHost` (one or more products each), `Distribution` (one product's publisher routes), `ProductNames`, `wait_for`, `wait_map`, `wait_limit`, `metric_value`, `exclusive` |
 | `oracle` | `TachygramOracle`, `EpochSchedule`, `ExpectedScope`, `Sampler`: expected answers computed from the authored chain only |
+| `memo_oracle` | `MemoOracle`, `FirstContactOracle` (`EnvelopeOracle<T>`), `SpanTruth`, `ScopeTruth`, `Family`: memo and first-contact answers, scope listings and spans from the authored envelopes only |
+| `memo_checks` | maps, listings and lookups of those two products judged against `memo_oracle` (`check_map`, `check_listing`, `check_lookups`, `judge`, `probes`, `spawn_prober`), and the scenario 6 key grinder |
 
 ### TLS edge
 
@@ -194,6 +204,35 @@ this package's features.
   restart rebuilds the chain from the spec, so control edits are lost.
 - `rpc(url, method, params)` makes one JSON-RPC call and returns `result`.
 
+### Memo and first-contact oracle
+
+`MemoOracle::new(&chain, epoch_length)` and `FirstContactOracle::new(..)` read
+only the fixtures' envelope ground truth: `chain.follow_ups(..)` /
+`chain.first_contacts(..)` (valid envelopes' entries, ordinal order) and each
+block's `envelope_counts()`. They depend on no protocol, table, store or
+publisher crate and parse no bytes. From that and their own arithmetic:
+
+- `scopes(anchor)`: every scope a map at `anchor` lists, with `scope_id`,
+  heights, entries, `n_buckets` (smallest power of two with
+  `entries <= target_load * 4096 * n`, target 34 for memo and 1 for
+  first-contact) and state (`last_height + 100 <= anchor`). Memo scopes are
+  epochs, the newest ending at the anchor.
+- `spans(anchor)` (first-contact): the spec 7.2 rule recomputed from per-epoch
+  counts of the blocks a journal holds at `anchor` (heights up to the anchor).
+  A boundary is decided once an epoch's last block is held; the open span
+  closes there when it holds at least 3,072 entries or covers 64 epochs; the
+  next span exists once a block of its first epoch is held. `scope_id` is the
+  first epoch, the index the span's position.
+- `expected(index, key16, anchor)`: every entry with that key at a covered
+  height, in ordinal order; empty means absent.
+- `envelope_counts(through)`: malformed envelopes and wallet-state entries of
+  the stored blocks, for `tachyon_memo_envelopes_invalid_total` and
+  `tachyon_memo_state_entries_total`.
+
+The scenario 6 grinder (`memo_checks::grind_overflow`) uses the protocol
+crate's placement to find, for each of the 64 seeds, `SLOTS + 1` keys sharing a
+row; the answers expected for them still come from the oracle.
+
 ### Budget
 
 Every end-to-end test body runs inside `budget::e2e(async { .. }).await`
@@ -263,3 +302,14 @@ the ephemeral range while other threads bind `:0`; two processes walking the
 same ports get disjoint ones, and a dead process's ports are released); the
 budget guard.
 `tests/tachygram.rs` holds the tachygram acceptance scenarios of spec 13.2.
+`tests/memo.rs` (16-block epochs) and `tests/first_contact.rs` (2-block epochs,
+so a span closes by the 64-epoch rule after 128 blocks; its standard chain
+also closes a span by count with 3,106 entries) hold scenarios 1-13 for memo
+and first-contact: no consumers (with the published span listing checked
+against the oracle at each anchor through closes and seals), cold bootstrap
+with exact answers and repeated tags (scenarios 2, 4, 5), incremental
+publication, forced overflow with ground keys, every `Malformation` plus
+hand-authored invalid envelopes with valid companions (skipped and counted,
+ingestion continues), shallow reorg (for first-contact one that removes an
+unsealed span boundary), reorg into a sealed scope (`410`), corrupt and
+truncated objects, publisher outage, restart of each process, and overload.

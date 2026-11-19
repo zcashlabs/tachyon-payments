@@ -19,10 +19,16 @@
 //!   TLS edge, query host) and the waits on its publications and maps.
 //! - [`oracle`]: the independent oracle, computed from the authored chain
 //!   only (spec 13.1).
+//! - [`memo_oracle`]: the independent memo and first-contact oracle, from
+//!   the authored envelopes only (epochs, the span rule, sealing, lookups).
+//! - [`memo_checks`]: maps, scope listings and lookup answers of those two
+//!   products judged against [`memo_oracle`].
 //!
 //! See the crate README for how a product test strings them together.
 pub mod budget;
 pub mod client;
+pub mod memo_checks;
+pub mod memo_oracle;
 pub mod node;
 pub mod oracle;
 pub mod process;

@@ -12,14 +12,17 @@ autobins = false
 [lib]
 path = "src/lib.rs"
 
-# Product end-to-end tests. `tachygram` is on by default so that
-# `cargo test --workspace` runs the tachygram acceptance scenarios (spec 13.2,
-# 14 M1). The re-declared host entrypoints below resolve their
-# `#[cfg(feature = ..)]` against this package's features, so each product
-# feature also enables the product in both host libraries.
+# Product end-to-end tests. Every product feature is on by default so that
+# `cargo test --workspace` runs the acceptance scenarios (spec 13.2; 14 M1 for
+# tachygram, M2 for memo and first-contact). The re-declared host entrypoints
+# below resolve their `#[cfg(feature = ..)]` against this package's features,
+# so each product feature also enables the product in both host libraries.
+# First-contact runs inside the memo publisher (spec 11.7), so it needs memo.
 [features]
-default = ["tachygram"]
+default = ["tachygram", "memo", "first-contact"]
 tachygram = ["tachyon-pir-publisher/tachygram", "tachyon-pir-query-server/tachygram"]
+memo = ["tachyon-pir-publisher/memo", "tachyon-pir-query-server/memo"]
+first-contact = ["memo", "tachyon-pir-publisher/first-contact", "tachyon-pir-query-server/first-contact"]
 
 # `CARGO_BIN_EXE_<name>` is set only for binaries of the test's own package, so
 # foreign entrypoints are re-declared here, as wallet-pir's pir-e2e-tests does.
@@ -47,6 +50,18 @@ doc = false
 name = "tachygram"
 path = "tests/tachygram.rs"
 required-features = ["tachygram"]
+
+# The memo tests need first-contact too: the publisher always hosts both
+# (one definition, spec 11.7), and the e2e topology enables both.
+[[test]]
+name = "memo"
+path = "tests/memo.rs"
+required-features = ["memo", "first-contact"]
+
+[[test]]
+name = "first_contact"
+path = "tests/first_contact.rs"
+required-features = ["first-contact"]
 
 [dependencies]
 bytes = "1"
