@@ -218,14 +218,161 @@ fn epoch_length_two_is_the_shortest_accepted() {
     );
 }
 
-#[cfg(all(feature = "memo", feature = "first-contact", feature = "tachygram"))]
+#[cfg(all(
+    feature = "memo",
+    feature = "first-contact",
+    feature = "tachygram",
+    feature = "registry"
+))]
 #[test]
 fn the_example_configuration_is_valid() {
     let example: Value = serde_json::from_str(include_str!("../publisher.example.json")).unwrap();
     let plan = parse(&example).unwrap().plan().unwrap();
-    assert_eq!(plan.product_names(), ["memo", "tachygram"]);
+    assert_eq!(plan.product_names(), ["memo", "tachygram", "registry"]);
+    assert_eq!(plan.registry.as_ref().unwrap().difficulty_bits, 20);
     assert_eq!(plan.publishers[0].resources.probes.len(), 2);
     assert_eq!(plan.chain.unwrap().epoch_length, 4096);
+}
+
+#[cfg(feature = "registry")]
+mod registry {
+    use super::*;
+    use tachyon_chain::{Hash, NetworkIdentity};
+
+    fn settings() -> Value {
+        json!({"listen": "127.0.0.1:9403", "state_dir": "/var/lib/tachyon-pir/registry"})
+    }
+
+    fn with_registry(settings: Value) -> Value {
+        let mut value = base();
+        value["registry"] = json!({"enabled": true, "settings": settings});
+        value
+    }
+
+    fn identity() -> NetworkIdentity {
+        NetworkIdentity {
+            chain: "test".into(),
+            genesis_hash: Hash::from_protocol_bytes([9; 32]),
+            activation_height: 8,
+        }
+    }
+
+    #[test]
+    fn an_enabled_registry_is_planned_and_bound_to_the_node_at_start_up() {
+        let plan = parse(&with_registry(settings())).unwrap().plan().unwrap();
+        assert_eq!(plan.product_names(), ["registry"]);
+        // Its definition waits for the node's identity.
+        assert!(plan.publishers.is_empty());
+        let settings = plan.registry.as_ref().unwrap();
+        assert_eq!(settings.difficulty_bits, 20);
+        assert_eq!(settings.listen.to_string(), "127.0.0.1:9403");
+
+        let definitions = plan.into_definitions(Some(&identity())).unwrap();
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        assert_eq!(definition.name, "registry");
+        assert!(!definition.follows_chain());
+        assert_eq!(
+            definition.resources.listeners,
+            ["127.0.0.1:9403".parse().unwrap()]
+        );
+        let probes: Vec<_> = definition.resources.probes.iter().map(|p| p.path).collect();
+        assert_eq!(probes, ["/provider/registry/v1/current"]);
+
+        let plan = parse(&with_registry(super::registry::settings()))
+            .unwrap()
+            .plan()
+            .unwrap();
+        let Err(error) = plan.into_definitions(None) else {
+            panic!("a registry definition without the node's identity");
+        };
+        let error = error.to_string();
+        assert!(error.contains("identity was not read"), "{error}");
+    }
+
+    #[test]
+    fn registry_settings_are_checked_offline() {
+        for (field, replacement, expected) in [
+            (
+                "difficulty_bits",
+                json!(257),
+                "difficulty_bits 257 is above 256",
+            ),
+            (
+                "per_client_concurrent",
+                json!(0),
+                "per_client_concurrent must be at least 1",
+            ),
+            (
+                "global_per_minute",
+                json!(0),
+                "global_per_minute must be at least 1",
+            ),
+            ("upload_ms", json!(0), "upload_ms must be at least 1"),
+            ("state_dir", json!("registry"), "must be absolute"),
+            ("listen", json!("0.0.0.0:9403"), "fixed port"),
+            (
+                "listen",
+                json!("127.0.0.1:9400"),
+                "conflicts with the management listener",
+            ),
+            (
+                "secret",
+                json!("x"),
+                "registry.settings: unknown field `secret`",
+            ),
+        ] {
+            let mut settings = settings();
+            settings[field] = replacement.clone();
+            let error = refusal(with_registry(settings));
+            assert!(error.contains(expected), "{field}={replacement}: {error}");
+        }
+
+        let mut value = base();
+        value["registry"] = json!({"enabled": true});
+        assert!(refusal(value).contains("registry is enabled but has no settings"));
+
+        // The registry reads its identity from the node, so it needs the chain.
+        let mut value = with_registry(settings());
+        value.as_object_mut().unwrap().remove("chain");
+        assert!(refusal(value).contains("registry is enabled but there is no chain section"));
+
+        // Disabled: nothing planned, but present settings are still checked.
+        let mut value = base();
+        value["registry"] = json!({"enabled": false});
+        let plan = parse(&value).unwrap().plan().unwrap();
+        assert!(plan.registry.is_none() && plan.product_names().is_empty());
+        value["registry"]["settings"] = json!({"listen": "127.0.0.1:9403"});
+        assert!(refusal(value).contains("registry.settings: missing field `state_dir`"));
+    }
+
+    #[cfg(feature = "tachygram")]
+    #[test]
+    fn registry_and_tachygram_need_disjoint_listeners_and_state() {
+        let mut value = with_registry(settings());
+        value["tachygram"] = json!({"enabled": true, "settings": {
+            "listen": "127.0.0.1:9402", "state_dir": "/var/lib/tachyon-pir/tachygram"}});
+        let plan = parse(&value).unwrap().plan().unwrap();
+        assert_eq!(plan.product_names(), ["tachygram", "registry"]);
+
+        let mut shared = value.clone();
+        shared["registry"]["settings"]["listen"] = json!("127.0.0.1:9402");
+        let error = refusal(shared);
+        assert!(
+            error
+                .contains("registry listener 127.0.0.1:9402 conflicts with the tachygram listener"),
+            "{error}"
+        );
+
+        let mut nested = value.clone();
+        nested["registry"]["settings"]["state_dir"] =
+            json!("/var/lib/tachyon-pir/tachygram/registry");
+        let error = refusal(nested);
+        assert!(
+            error.contains("overlaps the tachygram state directory"),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(feature = "memo")]

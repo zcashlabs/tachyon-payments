@@ -45,6 +45,14 @@ fn check_accepts_a_valid_file_offline_and_creates_nothing() {
         }});
         products.push("tachygram");
     }
+    if cfg!(feature = "registry") {
+        config["registry"] = json!({"enabled": true, "settings": {
+            "listen": free().to_string(),
+            "state_dir": temp.path().join("registry"),
+            "difficulty_bits": 4,
+        }});
+        products.push("registry");
+    }
     let path = write_config(temp.path(), "publisher.json", &config);
     let output = check(&path);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -95,19 +103,58 @@ fn check_rejects_a_one_block_epoch() {
     );
 }
 
+/// A build without every product refuses a disabled section of one it lacks.
+#[cfg(not(all(
+    feature = "memo",
+    feature = "first-contact",
+    feature = "tachygram",
+    feature = "registry"
+)))]
 #[test]
 fn check_rejects_a_section_for_a_product_not_compiled_in() {
+    use tachyon_pir_publisher::Product;
+    let product = Product::ALL
+        .into_iter()
+        .find(|p| !p.compiled())
+        .expect("a product this build lacks");
     let temp = tempfile::tempdir().unwrap();
     let mut config = valid();
-    config["registry"] = json!({"enabled": false});
+    config[product.section()] = json!({"enabled": false});
     let path = write_config(temp.path(), "publisher.json", &config);
     let output = check(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("`registry` section") && stderr.contains("the `registry` feature"),
+        stderr.contains(&format!("`{}` section", product.section()))
+            && stderr.contains(&format!("the `{}` feature", product.feature())),
         "{stderr}"
     );
+}
+
+/// `--check` validates the registry's settings offline.
+#[cfg(feature = "registry")]
+#[test]
+fn check_rejects_bad_registry_settings_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    for (settings, expected) in [
+        (
+            json!({"listen": free().to_string(), "state_dir": temp.path().join("r"), "difficulty_bits": 257}),
+            "registry difficulty_bits 257 is above 256",
+        ),
+        (
+            json!({"listen": free().to_string(), "state_dir": temp.path().join("r"), "pow_bits": 4}),
+            "registry.settings: unknown field `pow_bits`",
+        ),
+    ] {
+        let mut config = valid();
+        config["registry"] = json!({"enabled": true, "settings": settings});
+        let path = write_config(temp.path(), "publisher.json", &config);
+        let output = check(&path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }
 
 #[test]

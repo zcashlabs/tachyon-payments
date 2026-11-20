@@ -9,6 +9,8 @@ members = [
     # Products.
     "src/memo/memo-store",
     "src/memo/memo-publisher",
+    "src/registry/registry-store",
+    "src/registry/registry-publisher",
     "src/tachygram/tachygram-store",
     "src/tachygram/tachygram-publisher",
     # Hosts.

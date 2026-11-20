@@ -13,32 +13,32 @@ use tachyon_chain::{
 /// check returns `Ok` without starting the host.
 pub async fn run(config: Config, shutdown: Shutdown) -> Result<()> {
     let plan = config.plan()?;
+    let mut identity = None;
     if let Some(chain) = &plan.chain {
-        let identity = tokio::select! {
+        let network = tokio::select! {
             identity = check_network(chain) => identity?,
             () = shutdown.cancelled() => return Ok(()),
         };
         tracing::info!(
-            chain = %identity.chain,
-            genesis = %identity.genesis_hash.display_hex(),
-            activation_height = identity.activation_height,
+            chain = %network.chain,
+            genesis = %network.genesis_hash.display_hex(),
+            activation_height = network.activation_height,
             epoch_length = chain.epoch_length,
             "node network identity"
         );
+        identity = Some(network);
     }
+    let management = plan.management_listen;
+    let chain = plan.chain.as_ref().map(|chain| chain.settings.clone());
     tracing::info!(
-        management = %plan.management_listen,
+        management = %management,
         products = ?plan.product_names(),
         "starting publisher host"
     );
-    pir_publisher::run_registered(
-        plan.management_listen,
-        plan.publishers,
-        plan.chain.map(|chain| chain.settings),
-        shutdown,
-    )
-    .await
-    .map_err(|error| format!("publisher host: {error}").into())
+    let publishers = plan.into_definitions(identity.as_ref())?;
+    pir_publisher::run_registered(management, publishers, chain, shutdown)
+        .await
+        .map_err(|error| format!("publisher host: {error}").into())
 }
 
 /// Read the node's network identity once: `getblockchaininfo` and

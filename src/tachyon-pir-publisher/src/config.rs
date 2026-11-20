@@ -144,14 +144,47 @@ pub struct ChainPlan {
 pub struct Plan {
     pub management_listen: SocketAddr,
     pub chain: Option<ChainPlan>,
-    /// One definition per enabled product, memo and first-contact sharing one.
+    /// One definition per enabled product that needs nothing from the node
+    /// to be declared: memo (with first-contact) and tachygram.
     pub publishers: Vec<PublisherDefinition<axum::Router>>,
+    /// The enabled registry's validated settings. Its definition is built by
+    /// [`Plan::into_definitions`] once the node's network identity is known
+    /// (spec 9.2).
+    #[cfg(feature = "registry")]
+    pub registry: Option<registry_publisher::RegistrySettings>,
 }
 
 impl Plan {
     /// The definition names, in registration order.
     pub fn product_names(&self) -> Vec<&'static str> {
-        self.publishers.iter().map(|p| p.name).collect()
+        #[cfg_attr(not(feature = "registry"), allow(unused_mut))]
+        let mut names: Vec<_> = self.publishers.iter().map(|p| p.name).collect();
+        #[cfg(feature = "registry")]
+        if self.registry.is_some() {
+            names.push("registry");
+        }
+        names
+    }
+
+    /// Every definition for the host, the registry's bound to `identity`, the
+    /// node's network identity (required when the registry is enabled).
+    #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
+    pub fn into_definitions(
+        self,
+        identity: Option<&tachyon_chain::NetworkIdentity>,
+    ) -> Result<Vec<PublisherDefinition<axum::Router>>> {
+        #[cfg_attr(not(feature = "registry"), allow(unused_mut))]
+        let mut publishers = self.publishers;
+        #[cfg(feature = "registry")]
+        if let Some(settings) = self.registry {
+            let identity =
+                identity.ok_or("registry is enabled but the node's identity was not read")?;
+            publishers.push(products::registry(
+                settings,
+                products::registry_identity(identity),
+            )?);
+        }
+        Ok(publishers)
     }
 }
 
@@ -196,6 +229,8 @@ impl Config {
     ///    enabled.
     /// 4. Each compiled product's settings against its own schema (unknown
     ///    fields refused); an enabled product needs settings.
+    ///    The registry's settings are checked here too, under a stand-in
+    ///    network identity; the real one is read from the node at start-up.
     /// 5. The resource layout `run_registered` will enforce: a loopback
     ///    management listener, private product listeners with fixed ports and
     ///    no sharing, absolute state directories disjoint between products.
@@ -230,11 +265,27 @@ impl Config {
             .into());
         }
         let publishers = products::definitions(self, chain.as_ref())?;
+        #[cfg(feature = "registry")]
+        let registry = products::registry_settings(self)?;
+        #[cfg(feature = "registry")]
+        {
+            // The layout includes the registry's listener and state directory;
+            // its identity comes from the node only at start-up.
+            let mut declared = Vec::new();
+            if let Some(settings) = &registry {
+                declared.push(products::registry_for_check(settings.clone())?);
+            }
+            let all: Vec<_> = publishers.iter().chain(&declared).collect();
+            layout::validate(self.management_listen, all)?;
+        }
+        #[cfg(not(feature = "registry"))]
         layout::validate(self.management_listen, &publishers)?;
         Ok(Plan {
             management_listen: self.management_listen,
             chain,
             publishers,
+            #[cfg(feature = "registry")]
+            registry,
         })
     }
 }
@@ -299,7 +350,10 @@ impl Chain {
 
 /// Parse a compiled product's settings against its schema, naming the
 /// section in the error.
-#[cfg_attr(not(any(feature = "memo", feature = "tachygram")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "memo", feature = "tachygram", feature = "registry")),
+    allow(dead_code)
+)]
 pub(crate) fn settings<T: serde::de::DeserializeOwned>(
     product: Product,
     section: &Section,

@@ -20,5 +20,13 @@
       "listen": "127.0.0.1:9402",
       "state_dir": "/var/lib/tachyon-pir/tachygram"
     }
+  },
+  "registry": {
+    "enabled": true,
+    "settings": {
+      "listen": "127.0.0.1:9403",
+      "state_dir": "/var/lib/tachyon-pir/registry",
+      "difficulty_bits": 20
+    }
   }
 }

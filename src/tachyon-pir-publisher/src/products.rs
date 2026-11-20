@@ -7,6 +7,11 @@
 //! below. Memo and first-contact register as **one** definition, named
 //! `memo`, on the memo listener (spec 11.7), so the memo block reads both
 //! sections.
+//!
+//! The registry follows no chain, but its definition is bound to the node's
+//! network identity (spec 9.2), which is read only at start-up: `--check`
+//! validates its settings and resources under a stand-in identity, and
+//! `Plan::into_definitions` builds the definition that is run.
 use crate::{ChainPlan, Config, Result};
 use pir_pipeline::publisher::PublisherDefinition;
 
@@ -33,7 +38,7 @@ pub(crate) fn definitions(
 
 /// The settings of `product`'s section, checked whenever present; `None`
 /// when the section is absent or disabled.
-#[cfg(any(feature = "memo", feature = "tachygram"))]
+#[cfg(any(feature = "memo", feature = "tachygram", feature = "registry"))]
 fn section_settings<T: serde::de::DeserializeOwned>(
     config: &Config,
     product: crate::Product,
@@ -100,4 +105,62 @@ fn tachygram(
     )
     .map_err(|error| format!("tachygram: {error}"))?;
     Ok(Some(definition))
+}
+
+/// The enabled registry's settings, checked offline (whenever the section is
+/// present, enabled or not); `None` when it is absent or disabled.
+#[cfg(feature = "registry")]
+pub(crate) fn registry_settings(
+    config: &Config,
+) -> Result<Option<registry_publisher::RegistrySettings>> {
+    let settings: Option<registry_publisher::RegistrySettings> =
+        section_settings(config, crate::Product::Registry)?;
+    if let Some(settings) = &settings {
+        registry_for_check(settings.clone())?;
+    }
+    Ok(settings)
+}
+
+/// The registry identity of the node's network: its `chain` name and genesis
+/// hash in protocol order (spec 9.2).
+#[cfg(feature = "registry")]
+pub(crate) fn registry_identity(
+    network: &tachyon_chain::NetworkIdentity,
+) -> registry_publisher::RegistryIdentity {
+    registry_publisher::RegistryIdentity::new(
+        network.chain.clone(),
+        tachyon_pir_protocol::BlockHash::from_protocol_bytes(
+            *network.genesis_hash.protocol_bytes(),
+        ),
+    )
+}
+
+/// The registry definition bound to `identity`. It does not follow the chain.
+#[cfg(feature = "registry")]
+pub(crate) fn registry(
+    settings: registry_publisher::RegistrySettings,
+    identity: registry_publisher::RegistryIdentity,
+) -> Result<PublisherDefinition<axum::Router>> {
+    let config = registry_publisher::RegistryConfig::new(settings, identity);
+    config
+        .validate()
+        .map_err(|error| format!("registry: {error}"))?;
+    let definition = registry_publisher::configure(config, pir_pipeline::engine::PublisherEngine)
+        .map_err(|error| format!("registry: {error}"))?;
+    Ok(definition)
+}
+
+/// The registry definition under a stand-in identity, for the static checks
+/// only (settings and declared resources); it is never handed to the host.
+/// `RegistryConfig::validate`'s one identity rule, a named chain, holds for
+/// every identity `NodeClient::network_identity` returns.
+#[cfg(feature = "registry")]
+pub(crate) fn registry_for_check(
+    settings: registry_publisher::RegistrySettings,
+) -> Result<PublisherDefinition<axum::Router>> {
+    let unchecked = registry_publisher::RegistryIdentity::new(
+        "read-from-the-node-at-start-up",
+        tachyon_pir_protocol::BlockHash::from_protocol_bytes([0; 32]),
+    );
+    registry(settings, unchecked)
 }

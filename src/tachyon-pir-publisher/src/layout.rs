@@ -18,9 +18,9 @@ struct Layout {
 }
 
 /// Check the management listener and every definition's declared resources.
-pub(crate) fn validate(
+pub(crate) fn validate<'a>(
     management_listen: SocketAddr,
-    publishers: &[PublisherDefinition<axum::Router>],
+    publishers: impl IntoIterator<Item = &'a PublisherDefinition<axum::Router>>,
 ) -> Result<()> {
     if !management_listen.ip().is_loopback() {
         return Err(
@@ -173,7 +173,11 @@ mod tests {
     fn management_must_be_loopback_with_a_fixed_port() {
         for address in ["10.0.0.5:9400", "0.0.0.0:9400", "127.0.0.1:0"] {
             assert!(
-                validate(address.parse().unwrap(), &[]).is_err(),
+                validate(
+                    address.parse().unwrap(),
+                    &[] as &[PublisherDefinition<axum::Router>]
+                )
+                .is_err(),
                 "{address}"
             );
         }
