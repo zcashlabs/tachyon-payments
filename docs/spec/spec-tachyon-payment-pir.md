@@ -792,8 +792,8 @@ challenge(32) || nonce(8) || addr(1216)
   response is sent after that commit.
   `visible_after_sequence` is the entry's log sequence `s` (section 9.4,
   counting from 0). The entry is contained in every registry publication
-  whose map has `log_sequence > s`; the publisher publishes such a map at its
-  next publication.
+  whose map has `log_sequence > s`; the publisher publishes such a map at the
+  first publication that starts after the acknowledgement.
 - Entries are never deleted or changed.
 
 Abuse controls:
@@ -806,6 +806,9 @@ Abuse controls:
 | Body limit | 1,256 bytes exactly; shorter `400`, longer `413` | fixed |
 | Upload deadline | 15 s, then `408` | `upload_ms` (default 15,000) |
 | Global rate | 600 per minute by default; above it `429` with `Retry-After` | `global_per_minute` |
+
+The per-client concurrency slot is taken before the body is read and held
+until the response is sent.
 
 Rates are counted over a sliding 60-second window of accepted-for-processing
 requests; `Retry-After` is the whole number of seconds until the window admits
@@ -1018,7 +1021,7 @@ JSON body `{"code": "...", "message": "..."}`, as Enhance returns.
 | 409 | `stale_routing` | Session belongs to a map this server no longer holds; body includes `map_sha256` | Refetch map, retry once |
 | 410 | `session_unavailable` | Session revoked by a reorg | Refetch map; re-accept the anchor |
 | 413 | `invalid_request` | Body over the limit | Do not retry |
-| 429 | `overloaded` | Admission refused; `Retry-After: 1` | Retry later |
+| 429 | `overloaded` | Admission refused; `Retry-After` is 1 for query admission and per-client slots, and the window's remaining seconds for the registry rate limits (section 9.3) | Retry later |
 | 503 | `temporarily_unavailable` | Not ready or no serving authority | Retry later |
 
 Any other refusal (unknown route, wrong method, a chunk `base` that does not
@@ -1260,7 +1263,8 @@ Publisher:
   product definition, and disjoint state directories between definitions.
 - `chain` is required whenever any product is enabled; the registry reads only
   the network identity from it (the genesis hash of its distribution scope,
-  section 11.3). `chain.epoch_length` is required and has no default.
+  section 11.3). `chain.epoch_length` is required and has no default; a
+  registry-only publisher does not use it.
 - A product that stops is reported `failed` on `/ready` and is not restarted
   in-process (`run_registered`'s policy); the process supervisor restarts the
   publisher.
