@@ -209,6 +209,24 @@ fn standard_chain(seed: u64) -> (SyntheticChain, Repeats) {
     (chain, Repeats { d, e, collide })
 }
 
+/// The standard chain's shape with follow-ups in the open newest epoch only
+/// (heights 152, 155, the anchor 158, and 159-160 above it): one table, for
+/// the scenario 10 tests, whose 10 s back-off leaves no time for more.
+fn open_epoch_chain(seed: u64) -> SyntheticChain {
+    let mut chain = SyntheticChain::new(filler_config(seed));
+    for (height, sizes) in [
+        (152u64, &[4usize][..]),
+        (155, &[3, 2]),
+        (158, &[4]),
+        (159, &[3]),
+        (160, &[2]),
+    ] {
+        let envelopes = sizes.iter().map(|n| fus(&mut chain, *n)).collect();
+        put(&mut chain, height, block(envelopes));
+    }
+    chain
+}
+
 /// `n` random nonzero `key16`s no entry of the chain uses (misses).
 fn fresh_keys(chain: &mut SyntheticChain, n: usize) -> Vec<[u8; 16]> {
     (0..n)
@@ -1412,7 +1430,7 @@ async fn previous_served(
 /// Scenario 10, for one fault on the new open table's rows object: the
 /// object is refused (the pass fails), the query host keeps serving the
 /// previous publication with exact answers, and switches once the object
-/// arrives intact.
+/// arrives intact. The chain has one table, the open epoch's.
 ///
 /// The host's next pass is held at `current` while the chain grows, so the
 /// fault is in place before the new publication's objects are requested.
@@ -1423,7 +1441,7 @@ async fn refused_object(seed: u64, fault: Fault) {
     let budget = Budget::start();
     budget
         .run(async {
-            let (mut chain, _) = standard_chain(seed);
+            let mut chain = open_epoch_chain(seed);
             let fresh = fresh_keys(&mut chain, 2);
             let before = oracle(&chain);
             let t = Topology::start(

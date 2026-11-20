@@ -242,6 +242,24 @@ fn grow(chain: &mut SyntheticChain, repeats: &Repeats, tip: u64) {
     fill_to(chain, tip);
 }
 
+/// One open span (span 0, heights 8-) with first contacts in its first
+/// block, at height 30, at the anchor 58 and above it, tip 60: one table, for
+/// the scenario 10 tests, whose 10 s back-off leaves no time for more.
+fn open_span_chain(seed: u64) -> SyntheticChain {
+    let mut chain = SyntheticChain::new(filler_config(seed));
+    for (height, sizes) in [
+        (8u64, &[3usize][..]),
+        (30, &[2, 2]),
+        (58, &[3]),
+        (59, &[2]),
+        (60, &[1]),
+    ] {
+        let envelopes = sizes.iter().map(|n| fcs(&mut chain, *n)).collect();
+        put(&mut chain, height, block(envelopes));
+    }
+    chain
+}
+
 fn fresh_keys(chain: &mut SyntheticChain, n: usize) -> Vec<[u8; 16]> {
     (0..n).map(|_| key16(&fresh_tag(chain))).collect()
 }
@@ -1414,15 +1432,16 @@ async fn reorg_into_sealed_span_recovers_and_revokes() {
         .await
 }
 
-/// Scenario 10, for one fault on span 2's new rows object: refused, the
-/// previous publication keeps serving exact answers, and the host switches
-/// once the object arrives intact.
+/// Scenario 10, for one fault on the open span's new rows object: refused,
+/// the previous publication keeps serving exact answers, and the host
+/// switches once the object arrives intact. The chain has one table, the
+/// open span's.
 async fn refused_object(seed: u64, fault: Fault) {
     let _serial = exclusive().await;
     let budget = Budget::start();
     budget
         .run(async {
-            let (mut chain, _) = standard_chain(seed, 245, false);
+            let mut chain = open_span_chain(seed);
             let fresh = fresh_keys(&mut chain, 2);
             let before = oracle(&chain);
             let t = Topology::start(
@@ -1454,8 +1473,8 @@ async fn refused_object(seed: u64, fault: Fault) {
             let after = edit_chain(&t, |chain| {
                 let b = fcs(chain, 4);
                 added = b.iter().map(AuthoredEntry::key16).collect::<Vec<_>>();
-                put(chain, 247, block(vec![b]));
-                fill_to(chain, 249);
+                put(chain, 62, block(vec![b]));
+                fill_to(chain, 64);
             });
             let new = t
                 .publisher
@@ -1508,7 +1527,7 @@ async fn refused_object(seed: u64, fault: Fault) {
                 &wallet,
                 &map,
                 &before,
-                &key_probes(2, added.iter().copied()),
+                &key_probes(0, added.iter().copied()),
                 PARALLEL,
             )
             .await;
@@ -1522,23 +1541,25 @@ async fn refused_object(seed: u64, fault: Fault) {
                 &wallet,
                 &new_map,
                 &after,
-                &scope_probes(&after, 2, after.anchor()),
+                &scope_probes(&after, 0, after.anchor()),
                 PARALLEL,
             )
             .await;
-            assert_eq!(tally.entries, after.scope_entries(2, after.anchor()).len());
+            assert_eq!(tally.entries, after.scope_entries(0, after.anchor()).len());
             eprintln!("switched after {:?}", budget.elapsed());
         })
         .await
 }
 
-/// Scenario 10, corrupt: span 2's rows object arrives with one bit flipped.
+/// Scenario 10, corrupt: the open span's rows object arrives with one bit
+/// flipped.
 #[tokio::test(flavor = "multi_thread")]
 async fn corrupt_object_is_refused_and_previous_publication_serves() {
     refused_object(10, Fault::CorruptBody).await;
 }
 
-/// Scenario 10, truncated: span 2's rows object is cut after half its body.
+/// Scenario 10, truncated: the open span's rows object is cut after half its
+/// body.
 #[tokio::test(flavor = "multi_thread")]
 async fn truncated_object_is_refused_and_previous_publication_serves() {
     refused_object(20, Fault::TruncateBody).await;

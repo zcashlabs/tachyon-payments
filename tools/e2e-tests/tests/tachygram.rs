@@ -128,6 +128,25 @@ fn standard_chain(seed: u64) -> SyntheticChain {
     chain
 }
 
+/// The standard chain's shape with proof stamps in the open newest epoch
+/// only (heights 152, 155, the anchor 158, and 159-160 above it): one table,
+/// for the scenario 10 tests, whose 10 s back-off leaves no time for more.
+fn open_epoch_chain(seed: u64) -> SyntheticChain {
+    let mut chain = SyntheticChain::new(filler_config(seed));
+    extend(
+        &mut chain,
+        160,
+        &[
+            (152, &[6]),
+            (155, &[5, 3]),
+            (158, &[7]),
+            (159, &[5]),
+            (160, &[6]),
+        ],
+    );
+    chain
+}
+
 // ---------------------------------------------------------------------------
 // Checks against the oracle.
 
@@ -1259,12 +1278,13 @@ async fn previous_served(
 /// One refusal only: the sync manager backs off 10 s after a failed pass
 /// (`pir_pipeline::consumer::polling`), so a second fault round would not fit
 /// the budget; corruption and truncation are therefore two tests.
+/// The chain has one table, the open epoch's.
 async fn refused_object(seed: u64, fault: Fault) {
     let _serial = exclusive().await;
     let budget = Budget::start();
     budget
         .run(async {
-            let mut chain = standard_chain(seed);
+            let mut chain = open_epoch_chain(seed);
             let fresh = chain.fresh_tachygrams(2);
             let before = TachygramOracle::new(&chain, u64::from(EPOCH_LENGTH));
             let t = Topology::start(

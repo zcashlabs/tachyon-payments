@@ -45,13 +45,77 @@ pub fn wait_limit(budget: &Budget) -> Duration {
 }
 
 /// Tests that spawn both hosts and prepare real tables are CPU- and
-/// memory-heavy (spec 13.1: about 1 s per table on each side), so within one
-/// test process they run one at a time: each takes this guard before its
-/// budget starts. `cargo test` runs a binary's tests in parallel; without it
-/// they would slow one another past their budgets.
-pub async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+/// memory-heavy (spec 13.1: about 1 s per table on each side), so they run
+/// one at a time: each takes this guard before its budget starts. It holds
+///
+/// - an in-process mutex, because `cargo test` runs a binary's tests in
+///   parallel threads, and
+/// - when `TACHYON_E2E_EXCLUSIVE_LOCK` names a file, an exclusive `flock` on
+///   it, so heavy tests also run one at a time across every e2e test binary
+///   that sets the same path (a runner that starts the binaries in parallel).
+///
+/// The file lock is opt-in because waiting for it is part of the test's wall
+/// time as libtest and `tools/ci/test_budget.py` measure it: that script runs
+/// test binaries in parallel and times each test from its start, so tests
+/// queued behind other binaries' would reach its 30 s limit. `cargo test`
+/// runs test binaries one after another and needs no file lock.
+///
+/// Both are released when the guard drops; the kernel drops the file lock if
+/// the process dies. The lock file is opened close-on-exec, so spawned hosts
+/// never inherit the lock.
+pub async fn exclusive() -> Exclusive {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    SERIAL.lock().await
+    let serial = SERIAL.lock().await;
+    let file = match exclusive_lock_path() {
+        Some(path) => Some(
+            tokio::task::spawn_blocking(move || lock_exclusive(&path))
+                .await
+                .expect("the exclusive-lock task"),
+        ),
+        None => None,
+    };
+    Exclusive {
+        _file: file,
+        _serial: serial,
+    }
+}
+
+/// The guard [`exclusive`] returns.
+#[derive(Debug)]
+pub struct Exclusive {
+    // Field order: the file lock is released before the in-process mutex.
+    _file: Option<std::fs::File>,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// The cross-process lock file of [`exclusive`]: `TACHYON_E2E_EXCLUSIVE_LOCK`,
+/// if set and non-empty.
+pub fn exclusive_lock_path() -> Option<PathBuf> {
+    std::env::var_os("TACHYON_E2E_EXCLUSIVE_LOCK")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Opens `path` and blocks until this process holds an exclusive `flock` on
+/// it.
+fn lock_exclusive(path: &Path) -> std::fs::File {
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open the e2e exclusive lock {}: {error}", path.display()));
+    loop {
+        // SAFETY: `file` is an open descriptor for the whole call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return file;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            panic!("lock {}: {error}", path.display());
+        }
+    }
 }
 
 /// Polls `check` every [`POLL`] until it returns `Some`, panicking with

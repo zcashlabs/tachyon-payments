@@ -239,6 +239,26 @@ Every end-to-end test body runs inside `budget::e2e(async { .. }).await`
 (25 s, `DEFAULT_BUDGET`). Use `Budget::start()` when a test needs
 `remaining()` as the deadline of its waits. The guard fails the test with its
 name and elapsed time, before `tools/ci/test_budget.py` kills it at 30 s.
+With `TACHYON_E2E_TIMINGS=<file>` set, each guard that completes appends
+`<test binary> <test name> <seconds>` to the file: the in-test time it
+measured, for reports.
+
+### Exclusivity
+
+`topology::exclusive().await` is taken by every host-spawning test before its
+budget starts, and held for the test: an in-process mutex, because a binary's
+tests run in parallel threads. `cargo test` runs test binaries one after
+another, so that is all it needs.
+
+With `TACHYON_E2E_EXCLUSIVE_LOCK=<file>` the guard also holds an exclusive
+`flock` on that file, so heavy tests run one at a time across every e2e test
+binary started with the same path, for a runner that starts binaries in
+parallel. It is opt-in because waiting for the lock is part of a test's wall
+time as libtest and `tools/ci/test_budget.py` measure it: that script runs
+binaries in parallel (`--jobs`) and times each test from its start, so a test
+queued behind another binary's would reach the 30 s limit. The kernel drops
+the lock when the process exits; the file is opened close-on-exec, so spawned
+hosts do not inherit it.
 
 ## How a product end-to-end test is written
 
@@ -248,7 +268,7 @@ name and elapsed time, before `tools/ci/test_budget.py` kills it at 30 s.
 ```rust
 #[tokio::test(flavor = "multi_thread")]
 async fn cold_bootstrap() {
-    let _serial = exclusive().await;          // one host-spawning test at a time per binary
+    let _serial = exclusive().await;          // one host-spawning test at a time
     let budget = Budget::start();
     budget.run(async {
         let chain = authored_chain();          // SyntheticChain: the ground truth

@@ -70,10 +70,37 @@ impl Budget {
     pub async fn run<F: Future>(&self, test: F) -> F::Output {
         match tokio::time::timeout(self.remaining(), test).await {
             Ok(output) => {
+                self.record();
                 self.check();
                 output
             }
             Err(_) => panic!("{}", self.exceeded(self.elapsed())),
+        }
+    }
+
+    /// Appends `<test binary> <test name> <seconds>` to the file named by
+    /// `TACHYON_E2E_TIMINGS`, if set: the in-test time this guard measures,
+    /// for reports.
+    fn record(&self) {
+        let Some(path) = std::env::var_os("TACHYON_E2E_TIMINGS") else {
+            return;
+        };
+        use std::io::Write as _;
+        let binary = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.file_stem()?.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        let line = format!(
+            "{binary} {} {:.2}\n",
+            self.name,
+            self.elapsed().as_secs_f64()
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
         }
     }
 
