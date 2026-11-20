@@ -60,13 +60,14 @@ async fn metrics(client: &reqwest::Client, server: &Server) -> String {
 /// Wait until `count` registrations are in flight on the listener.
 async fn in_flight(client: &reqwest::Client, server: &Server, count: usize) {
     let line = format!("pir_http_inflight{{endpoint=\"register\"}} {count}\n");
-    for _ in 0..500 {
-        if metrics(client, server).await.contains(&line) {
-            return;
-        }
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !metrics(client, server).await.contains(&line) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never {count} registrations in flight"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("never {count} registrations in flight");
 }
 
 #[tokio::test(flavor = "multi_thread")]

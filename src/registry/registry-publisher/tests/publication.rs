@@ -105,21 +105,23 @@ async fn registrations_during_the_interval_coalesce_into_one_publication() {
     let client = reqwest::Client::new();
     let server = Server::start(dir.path(), true, |s| s.publish_ms = 3000).await;
     wait_for(&server, 0).await;
+    // No publication containing address 110 can start before this instant,
+    // and the next one starts at least publish_ms after that one started.
+    let before = Instant::now();
     register(&client, &server, &address(110), 6).await;
     let first = wait_for(&server, 1).await;
-    let seen = Instant::now();
     // Three registrations land while the loop waits out publish_ms.
     let three: Vec<_> = (111..114).map(address).collect();
     futures_util::future::join_all(three.iter().map(|a| register(&client, &server, a, 6))).await;
     let second = wait_for(&server, 4).await;
-    // One publication carries all three, publish_ms after the previous one
-    // started.
+    // One publication carries all three, started at least publish_ms after
+    // the previous one, which started after `before`.
     assert_eq!(second.head.log_sequence, 4);
     assert_eq!(generation(&second), generation(&first) + 1);
     assert!(
-        seen.elapsed() >= Duration::from_millis(2000),
+        before.elapsed() >= Duration::from_millis(3000),
         "{:?}",
-        seen.elapsed()
+        before.elapsed()
     );
     server.stop().await;
 }

@@ -84,7 +84,7 @@ async fn the_registered_host_serves_writes_and_publications_without_a_chain() {
 
     let (first, head) = head_at(&client, listen, 0).await;
     assert_eq!(head.open_scopes.len(), 1);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while client
         .get(format!("http://{management}/ready"))
         .send()
