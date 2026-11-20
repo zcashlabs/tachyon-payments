@@ -23,6 +23,14 @@
 //!   the authored envelopes only (epochs, the span rule, sealing, lookups).
 //! - [`memo_checks`]: maps, scope listings and lookup answers of those two
 //!   products judged against [`memo_oracle`].
+//! - [`registry_topology`]: the registry's topology (publisher with the
+//!   registry, TLS edge, query host) and the write-API client the test
+//!   registers through, playing the reverse proxy.
+//! - [`registry_oracle`]: the independent registry oracle, the test's own
+//!   record of what it registered (addresses, digests, acknowledged
+//!   sequences and chunks).
+//! - [`registry_checks`]: registry maps, chunk listings and lookup answers
+//!   judged against [`registry_oracle`].
 //!
 //! See the crate README for how a product test strings them together.
 pub mod budget;
@@ -32,6 +40,9 @@ pub mod memo_oracle;
 pub mod node;
 pub mod oracle;
 pub mod process;
+pub mod registry_checks;
+pub mod registry_oracle;
+pub mod registry_topology;
 pub mod tls_edge;
 pub mod topology;
 

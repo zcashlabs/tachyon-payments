@@ -3,7 +3,7 @@
 End-to-end tests across real HTTP boundaries (spec sections 4.1 and 13.1), and
 the harness they are written with: the harness library (`src/`), its own tests
 (`tests/harness.rs`) and the product acceptance suites (`tests/tachygram.rs`,
-`tests/memo.rs`, `tests/first_contact.rs`; spec 13.2).
+`tests/memo.rs`, `tests/first_contact.rs`, `tests/registry.rs`; spec 13.2).
 
 ## Features
 
@@ -12,10 +12,10 @@ the harness they are written with: the harness library (`src/`), its own tests
 | `tachygram` | on | builds the re-declared hosts with `tachyon-pir-publisher/tachygram` and `tachyon-pir-query-server/tachygram`, and enables `tests/tachygram.rs` (`required-features`) |
 | `memo` | on | the same with `tachyon-pir-publisher/memo` and `tachyon-pir-query-server/memo`; `tests/memo.rs` needs `memo` and `first-contact` |
 | `first-contact` | on | implies `memo` (first-contact runs inside the memo publisher, spec 11.7); adds both hosts' `first-contact` and enables `tests/first_contact.rs` |
+| `registry` | on | the same with `tachyon-pir-publisher/registry` and `tachyon-pir-query-server/registry`; enables `tests/registry.rs` |
 
 Every product feature is a default, so `cargo test --workspace` runs every
-product's acceptance scenarios. A later product (registry) gets a feature of
-its own, built the same way.
+product's acceptance scenarios.
 
 ## Topology a product test builds
 
@@ -48,6 +48,9 @@ to it (`TopologyOptions::new` with either product sets `publish` to both). The q
 | `oracle` | `TachygramOracle`, `EpochSchedule`, `ExpectedScope`, `Sampler`: expected answers computed from the authored chain only |
 | `memo_oracle` | `MemoOracle`, `FirstContactOracle` (`EnvelopeOracle<T>`), `SpanTruth`, `ScopeTruth`, `Family`: memo and first-contact answers, scope listings and spans from the authored envelopes only |
 | `memo_checks` | maps, listings and lookups of those two products judged against `memo_oracle` (`check_map`, `check_listing`, `check_lookups`, `judge`, `probes`, `spawn_prober`), and the scenario 6 key grinder |
+| `registry_topology` | `RegistryTopology` (node double for the identity, publisher with the registry, TLS edge, query host, from `RegistryOptions`), `RegistryPublisher`, `RegistryQueryHost`, `RegistrySettings`, the write-API client `WriteApi` (`challenge`, `register`, `register_all`, `post`), `HeldUpload` (a registration held open after `100 Continue`), `register_body`, `solve`, `unsolved`, `parse_ack`, `assert_refusal`, `wait_map`, `wait_sequence` |
+| `registry_oracle` | `RegistryOracle`, `AddressGen`, `OracleAddress`, `invalid`, `Ack`, `ExpectedChunk`: the test's record of what it registered, digests from spec 9.1 with `sha2`, `pk` and `ek` checks, chunk structure |
+| `registry_checks` | registry maps, chunk listings and lookups judged against `registry_oracle` (`check_map`, `check_listing`, `check_lookups`, `judge`, `hits`, `misses`, `sample`, `spawn_prober`), and the scenario 6 address grinder |
 
 ### TLS edge
 
@@ -233,6 +236,39 @@ The scenario 6 grinder (`memo_checks::grind_overflow`) uses the protocol
 crate's placement to find, for each of the 64 seeds, `SLOTS + 1` keys sharing a
 row; the answers expected for them still come from the oracle.
 
+### Registry topology and oracle
+
+The registry has no chain source: its log grows only through the write API
+(spec 9.3). `RegistryTopology::launch` serves a genesis-only `SyntheticChain`
+from an in-process node double (the publisher reads the network identity
+from it once at start-up, spec 9.2), starts the publisher with only the
+registry enabled (`RegistrySettings`; `RegistrySettings::bulk()` is a 4-bit
+proof of work, limits far above any test's volume and `publish_ms` 100),
+fronts it with the edge (discovery to management; `/provider/registry/v1/`
+and `/registry/v1/` to the registry listener) and configures the query host
+(no `activation_height` or `epoch_length`, spec 11.7).
+
+Write-API traffic goes **directly to the registry listener with an
+`X-Forwarded-For` the test sets** (`t.write(ip)`, `WriteApi::as_client`):
+the test plays the reverse proxy spec 9.3 requires, so a test chooses which
+client a request comes from. `t.write_via_edge()` goes through the edge's
+`/registry/v1/` route instead; the edge overwrites `X-Forwarded-For` with
+the peer, so every request through it is one client.
+
+`RegistryOracle` is the test's own record of what it registered: each
+address it generated (`AddressGen`: `pk` below `2^254 < p`, `ek` with 768
+coefficients uniform below 3,329 and a random `ρ`), its digest computed with
+`sha2` from spec 9.1, and the acknowledged sequence and chunk.
+`record(address, ack)` checks each acknowledgement (digest, `chunk =
+sequence / 3072`, a repeat `created: false` at the same sequence, no
+sequence twice) and `assert_contiguous` that the sequences are `0 .. n`.
+From that alone: `chunks(log_sequence)` (sealed chunks of exactly 3,072,
+one open chunk `log_sequence / 3072`) and `expected(chunk, key16,
+log_sequence)` (the address, or absent). It depends on no protocol, store or
+publisher crate. The scenario 6 grinder (`registry_checks::grind_overflow`)
+varies only `ρ` and uses the protocol crate's placement; `solve` uses its
+`solve_pow`.
+
 ### Budget
 
 Every end-to-end test body runs inside `budget::e2e(async { .. }).await`
@@ -333,3 +369,17 @@ hand-authored invalid envelopes with valid companions (skipped and counted,
 ingestion continues), shallow reorg (for first-contact one that removes an
 unsealed span boundary), reorg into a sealed scope (`410`), corrupt and
 truncated objects, publisher outage, restart of each process, and overload.
+`tests/registry.rs` holds scenarios 1-4, 6 and 10-14 for the registry
+(milestone M3): no consumers (the empty log, then each batch published with
+the listing checked), cold bootstrap with exact answers (one registration
+through the edge), a sealed chunk of 3,072 registrations with the empty open
+chunk answering absent without a query, then incremental publication across
+both chunks, forced overflow with ground addresses, corrupt and truncated
+objects, publisher outage, restart of each process (the publisher killed
+right after a `200`), overload, and the writes: validation (challenge
+format and HMAC, forged, re-dated and expired challenges, proof of work and
+its counter, `pk` and `ek` boundaries, the order of the checks, body length,
+routes), idempotence, the abuse controls (per-client concurrency through
+held uploads, per-client rate, uploads that time out, the global cap, each
+with `Retry-After` and another client unaffected), visibility at
+`visible_after_sequence` and durability across `SIGKILL`.
