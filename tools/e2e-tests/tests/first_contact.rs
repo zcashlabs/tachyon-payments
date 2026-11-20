@@ -895,14 +895,15 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                 usize::from(rank >= slots)
             };
 
-            let t = Topology::start(
-                chain,
-                options(),
-                publisher_binary(),
-                query_binary(),
-                &budget,
-            )
-            .await;
+            // Every ground key is looked up: several clients, with admission
+            // wide enough for all of them at once (they share one address, so
+            // `per_client` covers them together).
+            let options = options().query_setting(
+                "admission",
+                json!({"executing": 24, "waiting": 64, "wait_ms": 10000, "per_client": 64}),
+            );
+            let t =
+                Topology::start(chain, options, publisher_binary(), query_binary(), &budget).await;
             let wallet = t.query.wallet();
             let map = wait_caught_up(&wallet, &oracle, &budget).await;
             let scope = chain_scope(&map, 0);
@@ -917,16 +918,39 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
             assert_eq!(segments[1].2, spilled as u64, "the hot row's excess spills");
 
             let hot_keys: BTreeSet<[u8; 16]> = hot_entries.iter().map(|r| r.key16()).collect();
-            let others: Vec<Probe> = oracle
-                .keys(0, anchor)
-                .into_iter()
-                .filter(|k| !hot_keys.contains(k))
-                .map(|key16| Probe { index: 0, key16 })
-                .collect();
+            // Every key of the span: the hot row's, every other ground key and
+            // the other first contacts; and misses.
+            let keys = oracle.keys(0, anchor);
+            assert!(ground.iter().all(|k| keys.contains(k)));
             let mut wanted_lookups = key_probes(0, hot_keys.iter().copied());
-            wanted_lookups.extend(Sampler::new(6).sample(&others, 60));
+            wanted_lookups.extend(key_probes(
+                0,
+                keys.iter().copied().filter(|k| !hot_keys.contains(k)),
+            ));
             wanted_lookups.extend(key_probes(0, fresh.iter().copied()));
-            let outcomes = lookups(&wallet, &map, &wanted_lookups, 2 * PARALLEL).await;
+            const CLIENTS: usize = 6;
+            let wallets: Vec<_> = (0..CLIENTS).map(|_| t.query.wallet()).collect();
+            let shares: Vec<Vec<Probe>> = (0..CLIENTS)
+                .map(|c| {
+                    wanted_lookups
+                        .iter()
+                        .copied()
+                        .skip(c)
+                        .step_by(CLIENTS)
+                        .collect()
+                })
+                .collect();
+            let outcomes: Vec<_> = futures_util::future::join_all(
+                wallets
+                    .iter()
+                    .zip(&shares)
+                    .map(|(wallet, share)| lookups(wallet, &map, share, 2 * PARALLEL)),
+            )
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+            assert_eq!(outcomes.len(), wanted_lookups.len());
             let mut tally = Tally::default();
             let mut in_segment = [0usize; 2];
             for (probe, outcome) in &outcomes {
@@ -947,7 +971,8 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     in_segment[1] += wanted[1];
                 }
             }
-            assert_eq!(tally.found, hot_keys.len() + 60);
+            assert_eq!(tally.found, keys.len(), "every key of the span is found");
+            assert_eq!(keys.len(), ground.len() + 6);
             assert_eq!(tally.absent, fresh.len());
             assert_eq!(in_segment, [slots, spilled]);
             let split: Vec<usize> = oracle
