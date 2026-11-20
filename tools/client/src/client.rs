@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::Poll;
 use std::time::Duration;
 
 use rand::{Rng, RngCore};
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tachyon_pir_protocol::query::{encode_request, validate_response};
 use tachyon_pir_protocol::{
     BlockHash, Bytes32, Entry, Geometry, HEADER_BYTES, MAX_MAP_HEAD_BYTES, PirParams, Product,
-    QueryHeader, RowContext, Table, lookup, validate_row,
+    QueryHeader, QueryTarget, RowContext, Table, lookup, validate_row,
 };
 use zakura_pir_client::native::{P8, ProfileClientExt as _};
 
@@ -357,76 +358,203 @@ impl Client {
     }
 
     /// Looks up `key` (the stored key: `key16`, or the full tachygram) in a
-    /// scope. A 409 refetches the map and retries once; nothing else is
-    /// retried.
+    /// scope: a batch of one ([`Client::lookup_many`]), its queries sent one
+    /// at a time in segment order. A 409 refetches the map and retries once;
+    /// nothing else is retried.
     pub async fn lookup(
         &self,
         map: &MapView,
         scope: ScopeSelector,
         key: &[u8],
     ) -> Result<LookupOutcome, ClientError> {
-        if key.len() != self.product.key_len() {
-            return Err(ClientError::KeyLength {
-                expected: self.product.key_len(),
-                actual: key.len(),
-            });
+        let mut outcomes = self.lookup_many(map, scope, &[key], 1).await?;
+        Ok(outcomes.pop().expect("one outcome per key"))
+    }
+
+    /// Looks up every key of `keys` in one scope, answering each exactly as
+    /// [`Client::lookup`] would, while querying each row once: the query plan
+    /// of every key is computed, each distinct (table, row) of the plans is
+    /// queried privately once, at most `parallel` at a time, and each key's
+    /// outcome is built from the decoded rows of its own plan (filter, per
+    /// segment [`QueriedTable`], tachygram duplicate check, found or absent).
+    /// Outcomes are in `keys` order.
+    ///
+    /// The batch succeeds or fails as a whole: a key of the wrong length
+    /// fails it before anything is sent, and the first failed query (or a
+    /// duplicate tachygram) fails it. A 409 refetches the map and retries
+    /// the whole batch once on the fresh map, and every outcome of the retry
+    /// is marked [`Answer::refetched_map`]; nothing else is retried.
+    ///
+    /// Each query still hides its row, but the number of queries is revealed
+    /// (spec 12.3): a batch sends one per distinct row, not one per key and
+    /// segment, so the host learns how many rows its keys share. It is a
+    /// diagnostic and test tool, not a wallet's lookup pattern.
+    pub async fn lookup_many<K: AsRef<[u8]>>(
+        &self,
+        map: &MapView,
+        scope: ScopeSelector,
+        keys: &[K],
+        parallel: usize,
+    ) -> Result<Vec<LookupOutcome>, ClientError> {
+        for key in keys {
+            let key = key.as_ref();
+            if key.len() != self.product.key_len() {
+                return Err(ClientError::KeyLength {
+                    expected: self.product.key_len(),
+                    actual: key.len(),
+                });
+            }
         }
-        match self.lookup_once(map, scope, key).await {
+        match self.lookup_once(map, scope, keys, parallel).await {
             Err(ClientError::StaleRouting { .. }) => {
                 let fresh = self.fetch_map().await?;
-                let mut outcome = self.lookup_once(&fresh, scope, key).await?;
-                outcome.mark_refetched();
-                Ok(outcome)
+                let mut outcomes = self.lookup_once(&fresh, scope, keys, parallel).await?;
+                for outcome in &mut outcomes {
+                    outcome.mark_refetched();
+                }
+                Ok(outcomes)
             }
             other => other,
         }
     }
 
-    async fn lookup_once(
+    /// One pass of [`Client::lookup_many`] under `map`, without the retry.
+    async fn lookup_once<K: AsRef<[u8]>>(
         &self,
         map: &MapView,
         selector: ScopeSelector,
-        key: &[u8],
-    ) -> Result<LookupOutcome, ClientError> {
+        keys: &[K],
+        parallel: usize,
+    ) -> Result<Vec<LookupOutcome>, ClientError> {
         let (index, scope) = map
             .scope(selector)
             .ok_or(ClientError::UnknownScope(selector))?;
         if index < map.floor_scope() {
-            return Ok(LookupOutcome::BelowFloor {
+            let below = LookupOutcome::BelowFloor {
                 scope_index: index,
                 floor_scope: map.floor_scope(),
-            });
+            };
+            return Ok(vec![below; keys.len()]);
         }
-        let plan = scope
-            .tables()
-            .query_plan(self.product, map.genesis_hash(), key)?;
-        let mut answer = answer_for(map, index, scope);
-        answer.bucket = plan.first().map(|t| t.table.bucket);
-        let mut found = Vec::new();
-        for target in &plan {
-            let entries = self.query_row(target.table, &target.context).await?;
-            let matches: Vec<Entry> = lookup(&entries, key).into_iter().cloned().collect();
-            answer.queries.push(QueriedTable {
-                bucket: target.table.bucket,
-                segment: target.table.segment,
-                row: target.row,
-                session_id: target.table.session_id,
-                row_entries: entries.len(),
-                matches: matches.len(),
-            });
-            found.extend(matches);
+        // Every key's plan, and the distinct (session, row) targets of all of
+        // them in first-use order (a batch of one: its plan, in segment
+        // order). A session names one table of the scope, and the row context
+        // is a function of the scope, the table and the row, so one decoded
+        // row serves every key whose plan names it.
+        let mut fetches: Vec<QueryTarget<'_>> = Vec::new();
+        let mut fetch_of: HashMap<(Bytes32, u32), usize> = HashMap::new();
+        let mut plans: Vec<Vec<(QueryTarget<'_>, usize)>> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let plan = scope
+                .tables()
+                .query_plan(self.product, map.genesis_hash(), key.as_ref())?;
+            let plan = plan
+                .into_iter()
+                .map(|target| {
+                    let fetch = *fetch_of
+                        .entry((target.table.session_id, target.row))
+                        .or_insert_with(|| {
+                            fetches.push(target);
+                            fetches.len() - 1
+                        });
+                    (target, fetch)
+                })
+                .collect();
+            plans.push(plan);
         }
-        if self.product == Product::Tachygram && found.len() > 1 {
-            return Err(ClientError::DuplicateTachygram(found.len()));
-        }
-        Ok(if found.is_empty() {
-            LookupOutcome::Absent { answer }
-        } else {
-            LookupOutcome::Found {
-                entries: found,
-                answer,
+        let rows = self.query_rows(&fetches, parallel).await?;
+        keys.iter()
+            .zip(plans)
+            .map(|(key, plan)| {
+                let key = key.as_ref();
+                let mut answer = answer_for(map, index, scope);
+                answer.bucket = plan.first().map(|(t, _)| t.table.bucket);
+                let mut found = Vec::new();
+                for (target, fetch) in &plan {
+                    let entries = &rows[*fetch];
+                    let matches: Vec<Entry> = lookup(entries, key).into_iter().cloned().collect();
+                    answer.queries.push(QueriedTable {
+                        bucket: target.table.bucket,
+                        segment: target.table.segment,
+                        row: target.row,
+                        session_id: target.table.session_id,
+                        row_entries: entries.len(),
+                        matches: matches.len(),
+                    });
+                    found.extend(matches);
+                }
+                if self.product == Product::Tachygram && found.len() > 1 {
+                    return Err(ClientError::DuplicateTachygram(found.len()));
+                }
+                Ok(if found.is_empty() {
+                    LookupOutcome::Absent { answer }
+                } else {
+                    LookupOutcome::Found {
+                        entries: found,
+                        answer,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The validated entries of every target's row, in `targets` order.
+    /// Each table's public setup is fetched (or found cached) first, in
+    /// order, so concurrent queries never fetch one twice; then the rows are
+    /// queried with at most `parallel` (at least one) in flight, started in
+    /// order; with one in flight they go out one at a time in `targets`
+    /// order and the first failure stops the rest. The first query to fail
+    /// fails the call and drops the others in flight.
+    async fn query_rows(
+        &self,
+        targets: &[QueryTarget<'_>],
+        parallel: usize,
+    ) -> Result<Vec<Vec<Entry>>, ClientError> {
+        let mut seen = HashSet::new();
+        for target in targets {
+            if seen.insert(target.table.session_id) {
+                self.public(target.table).await?;
             }
-        })
+        }
+        let parallel = parallel.max(1);
+        let mut rows: Vec<Option<Vec<Entry>>> = vec![None; targets.len()];
+        let mut queued = targets.iter().enumerate();
+        let mut in_flight = Vec::with_capacity(parallel.min(targets.len()));
+        loop {
+            while in_flight.len() < parallel {
+                let Some((i, target)) = queued.next() else {
+                    break;
+                };
+                in_flight.push((i, Box::pin(self.query_row(target.table, &target.context))));
+            }
+            if in_flight.is_empty() {
+                break;
+            }
+            let (i, row) = std::future::poll_fn(|cx| {
+                let ready =
+                    in_flight
+                        .iter_mut()
+                        .enumerate()
+                        .find_map(|(k, (i, query))| match query.as_mut().poll(cx) {
+                            Poll::Ready(row) => Some((k, *i, row)),
+                            Poll::Pending => None,
+                        });
+                match ready {
+                    Some((k, i, row)) => {
+                        // The finished query; its row is returned.
+                        let _done = in_flight.swap_remove(k);
+                        Poll::Ready((i, row))
+                    }
+                    None => Poll::Pending,
+                }
+            })
+            .await;
+            rows[i] = Some(row?);
+        }
+        Ok(rows
+            .into_iter()
+            .map(|row| row.expect("every target queried"))
+            .collect())
     }
 
     /// A dummy lookup (spec 12.3): a uniformly random bucket of the scope,
@@ -495,7 +623,9 @@ impl Client {
     }
 
     /// Queries `context.row` of `table` privately and returns the validated
-    /// entries of the decoded row.
+    /// entries of the decoded row. Query preparation and reply decoding are
+    /// CPU-bound and run on the blocking pool, so concurrent queries
+    /// ([`Client::lookup_many`]) prepare and decode in parallel.
     async fn query_row(
         &self,
         table: &Table,
@@ -503,14 +633,14 @@ impl Client {
     ) -> Result<Vec<Entry>, ClientError> {
         let params = pir_params(self.product, table.geometry);
         let public = self.public(table).await?;
-        let (secret, payload) = P8
-            .prepare(
-                params.setup(),
-                params.masks(),
-                params.rows(),
-                context.row as usize,
-            )
-            .map_err(ClientError::Pir)?;
+        let row = context.row as usize;
+        let prepare_params = params.clone();
+        let (secret, payload) = blocking(move || {
+            let params = prepare_params;
+            P8.prepare(params.setup(), params.masks(), params.rows(), row)
+                .map_err(ClientError::Pir)
+        })
+        .await?;
         if payload.len() != params.payload_len() {
             return Err(ClientError::Pir(format!(
                 "payload of {} bytes, expected {}",
@@ -547,17 +677,22 @@ impl Client {
             }
             other => other?,
         };
-        let reply = validate_response(&header, table.geometry, &bytes)?;
-        debug_assert_eq!(reply.len() + HEADER_BYTES, bytes.len());
-        let row = P8
-            .decode_cols(&secret, &public, reply, params.cols())
-            .map_err(ClientError::Pir)?;
-        validate_row(self.product, &row, context).map_err(|source| ClientError::Row {
-            bucket: table.bucket,
-            segment: table.segment,
-            row: context.row,
-            source,
+        let (product, geometry, context) = (self.product, table.geometry, *context);
+        let (bucket, segment) = (table.bucket, table.segment);
+        blocking(move || {
+            let reply = validate_response(&header, geometry, &bytes)?;
+            debug_assert_eq!(reply.len() + HEADER_BYTES, bytes.len());
+            let row = P8
+                .decode_cols(&secret, &public, reply, params.cols())
+                .map_err(ClientError::Pir)?;
+            validate_row(product, &row, &context).map_err(|source| ClientError::Row {
+                bucket,
+                segment,
+                row: context.row,
+                source,
+            })
         })
+        .await
     }
 
     /// `GET public/{session_id}`, cached by session id, checked against the
@@ -685,6 +820,17 @@ impl Client {
             .send()
             .await
             .map_err(|source| ClientError::Transport { route, source })
+    }
+}
+
+/// Runs CPU-bound `work` on the blocking pool; a panic in it resumes here.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("blocking task: {error}"),
+        },
     }
 }
 

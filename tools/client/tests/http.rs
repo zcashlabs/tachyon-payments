@@ -835,6 +835,158 @@ async fn dummy_query_sends_what_a_lookup_sends() {
     assert_eq!(dummy[0].1, Geometry::Tachyon4k8.request_len());
 }
 
+/// The distinct `(session, row)` pairs the answers queried.
+fn distinct_rows(outcomes: &[LookupOutcome]) -> std::collections::HashSet<(Bytes32, u32)> {
+    outcomes
+        .iter()
+        .flat_map(|o| o.answer().unwrap().queries.iter())
+        .map(|q| (q.session_id, q.row))
+        .collect()
+}
+
+/// A batch of keys, some sharing rows, against one lookup per key: every
+/// outcome is the per-key lookup's, field for field, and the batch queries
+/// each distinct row once.
+async fn check_batch(product: Product, scope: u64, inputs: &[Entry], misses: usize) {
+    let harness = Harness::start().await;
+    let client = harness.client(product);
+    let map = client.fetch_map().await.unwrap();
+    let selector = ScopeSelector::Index(scope);
+    let (_, view) = map.scope(selector).unwrap();
+    let plan_rows = |key: &[u8]| -> Vec<u32> {
+        view.tables()
+            .query_plan(product, map.genesis_hash(), key)
+            .unwrap()
+            .iter()
+            .map(|t| t.row)
+            .collect()
+    };
+
+    let mut keys = distinct_keys(inputs);
+    let hits = keys.len();
+    for i in 0..misses {
+        keys.push(Sha256::digest(format!("batch-miss{scope}-{i}"))[..product.key_len()].to_vec());
+    }
+    // A miss whose segment-0 row is the first hit's, a hit listed twice,
+    // and the first hit again at the end: keys that share rows.
+    let first = keys[0].clone();
+    let shared = (0..)
+        .map(|i| Sha256::digest(format!("batch-share{scope}-{i}"))[..product.key_len()].to_vec())
+        .find(|key| expected(inputs, key).is_empty() && plan_rows(key)[0] == plan_rows(&first)[0])
+        .unwrap();
+    keys.insert(1, shared.clone());
+    keys.insert(2, keys[3].clone());
+    keys.push(first);
+
+    let before = harness.served().3;
+    let batch = client.lookup_many(&map, selector, &keys, 4).await.unwrap();
+    let batch_queries = harness.served().3 - before;
+    assert_eq!(batch.len(), keys.len());
+
+    let single = harness.client(product);
+    let single_map = single.fetch_map().await.unwrap();
+    assert_eq!(single_map.map_sha256(), map.map_sha256());
+    let mut each = Vec::new();
+    for key in &keys {
+        each.push(single.lookup(&single_map, selector, key).await.unwrap());
+    }
+    assert_eq!(batch, each, "the batch answers each key as its lookup does");
+
+    // The oracle, for good measure: hits found with their entries in
+    // ordinal order, misses absent.
+    let mut found = 0;
+    for (key, outcome) in keys.iter().zip(&batch) {
+        match outcome {
+            LookupOutcome::Found { entries, .. } => {
+                assert_eq!(entries.iter().collect::<Vec<_>>(), expected(inputs, key));
+                found += 1;
+            }
+            LookupOutcome::Absent { .. } => assert!(expected(inputs, key).is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(found, hits + 2);
+    let LookupOutcome::Absent { answer } = &batch[1] else {
+        panic!("{:?}", batch[1]);
+    };
+    assert_eq!(answer.queries[0].row, plan_rows(&keys[0])[0]);
+    assert!(answer.queries[0].row_entries > 0, "a hit's row, shared");
+
+    // Each distinct row once, fewer queries than one lookup per key.
+    let per_key: u64 = each
+        .iter()
+        .map(|o| o.answer().unwrap().queries.len() as u64)
+        .sum();
+    assert_eq!(batch_queries, distinct_rows(&batch).len() as u64);
+    assert!(batch_queries < per_key, "{batch_queries} of {per_key}");
+    assert_eq!(client.stats().queries, batch_queries);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batched_memo_lookups_equal_one_lookup_per_key() {
+    let fixture: &Fixture = &FIXTURE;
+    // Scope 0: one bucket of three segments, so every key queries three.
+    check_batch(Product::Memo, 0, &fixture.inputs.memo0, 4).await;
+    check_batch(Product::Memo, 1, &fixture.inputs.memo1, 4).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batched_tachygram_lookups_equal_one_lookup_per_key() {
+    let fixture: &Fixture = &FIXTURE;
+    check_batch(Product::Tachygram, 0, &fixture.inputs.tachygram0, 6).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batched_lookup_refuses_bad_keys_and_retries_once_after_409() {
+    let harness = Harness::start().await;
+    let client = harness.client(Product::Memo);
+    let map = client.fetch_map().await.unwrap();
+    let first_sha = map.map_sha256();
+    let scope = ScopeSelector::Index(1);
+    let keys: Vec<[u8; 16]> = (0..6).map(|i| key16("memo1", i)).collect();
+
+    // A key of the wrong length fails the batch before anything is sent.
+    let bad: Vec<&[u8]> = vec![&keys[0], &keys[1][..15]];
+    assert!(matches!(
+        client.lookup_many(&map, scope, &bad, 4).await,
+        Err(ClientError::KeyLength {
+            expected: 16,
+            actual: 15
+        })
+    ));
+    assert_eq!(harness.served().3, 0);
+
+    // One 409: the map is refetched once and the whole batch retried on it.
+    harness.fault(&[Fault::Status(409)]);
+    let outcomes = client.lookup_many(&map, scope, &keys, 4).await.unwrap();
+    assert_eq!(harness.served().0, 2, "one map refetch");
+    let fresh = client.current_map().unwrap();
+    assert_ne!(fresh.map_sha256(), first_sha);
+    let single = harness.client(Product::Memo);
+    single.fetch_map().await.unwrap();
+    for (key, outcome) in keys.iter().zip(&outcomes) {
+        let mut want = single.lookup(&fresh, scope, key).await.unwrap();
+        let LookupOutcome::Found { answer, .. } = &mut want else {
+            panic!("{want:?}");
+        };
+        assert_eq!(answer.generation, 2);
+        assert!(!answer.refetched_map);
+        answer.refetched_map = true;
+        assert_eq!(*outcome, want);
+    }
+
+    // A 409 on the retry too is returned, not retried again; one at a time
+    // the passes stop at their first query.
+    let (heads, _, _, queries) = harness.served();
+    harness.fault(&[Fault::Status(409), Fault::Status(409)]);
+    assert!(matches!(
+        client.lookup_many(&map, scope, &keys, 1).await,
+        Err(ClientError::StaleRouting { .. })
+    ));
+    let (heads_after, _, _, queries_after) = harness.served();
+    assert_eq!((heads_after - heads, queries_after - queries), (1, 2));
+}
+
 async fn cli(harness: &Harness, args: &[&str]) -> (bool, Value) {
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_tachyon-pir-cli"))
         .arg("--origin")
@@ -944,6 +1096,20 @@ async fn host_floor_above_the_head_floor_is_refused_without_a_query() {
             floor_scope: 1
         })
     ));
+    let keys = [fixture.inputs.repeated, key16("memo0", 1)];
+    assert_eq!(
+        client
+            .lookup_many(&map, ScopeSelector::Index(0), &keys, 4)
+            .await
+            .unwrap(),
+        vec![
+            LookupOutcome::BelowFloor {
+                scope_index: 0,
+                floor_scope: 1
+            };
+            2
+        ]
+    );
     assert_eq!(harness.served().3, 0, "no query below the floor");
     // The scope at the floor is still served.
     let key = key16("memo1", 4);

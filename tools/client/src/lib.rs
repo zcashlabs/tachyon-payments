@@ -12,6 +12,10 @@
 //!   one private query per segment of the key's bucket, response framing
 //!   checks, row validation (spec 8.4), results concatenated in segment
 //!   (ordinal) order. A 409 refetches the map and retries once.
+//! - [`Client::lookup_many`]: many keys of one scope, each answered as
+//!   [`Client::lookup`] answers it, with each distinct row of their query
+//!   plans queried once (a bounded number at a time); a lookup is a batch of
+//!   one.
 //! - [`Client::dummy_query`]: the same requests for a random bucket and rows
 //!   (spec 12.3).
 //! - [`Client::accept_anchor`]: the map's genesis and anchor hashes against a
