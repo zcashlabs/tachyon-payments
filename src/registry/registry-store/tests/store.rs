@@ -8,11 +8,11 @@ use registry_store::{
     chunk_of, chunk_start,
 };
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Barrier;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tachyon_pir_protocol::BlockHash;
 use tachyon_pir_protocol::registry::Address;
 
@@ -256,17 +256,28 @@ fn an_unclosed_store_leaves_every_registration_on_disk() {
 
 const CRASH_CHILD: &str = "REGISTRY_STORE_CRASH_CHILD";
 const CRASH_TEST: &str = "acknowledged_registrations_survive_a_process_crash";
-/// The child stops by itself after this many registrations if never killed.
-const CRASH_CHILD_LIMIT: u64 = 50_000;
+/// Crash scenarios per run of the test, each in a fresh store.
+const CRASH_ROUNDS: u64 = 4;
 
-/// The child half of the crash test: registers address `i` of family 5 for
-/// `i = 0, 1, ...` and prints `ack i sequence` after each `register` returns,
-/// that is when the registration could be acknowledged.
+/// The child half of the crash test, run in lockstep with the parent: for
+/// `i = 0, 1, ...` it waits for one "go" byte on stdin, registers address `i`
+/// of family 5, and writes and flushes `ack i sequence`, that is acknowledges
+/// once `register` has returned. It stops at end of input.
 fn crash_child(path: &Path) {
     let store = open(path);
-    for index in 0..CRASH_CHILD_LIMIT {
+    let mut stdin = std::io::stdin().lock();
+    // Written to the file descriptor directly, not through the test
+    // harness's output capture.
+    let mut stdout = std::io::stdout().lock();
+    let mut go = [0u8; 1];
+    for index in 0.. {
+        if stdin.read_exact(&mut go).is_err() {
+            return;
+        }
         let registration = store.register(&address(5, index)).unwrap();
-        println!("ack {index} {}", registration.sequence);
+        // On a line of its own: the harness may have left "test ... " open.
+        writeln!(stdout, "\nack {index} {}", registration.sequence).unwrap();
+        stdout.flush().unwrap();
     }
 }
 
@@ -274,61 +285,123 @@ fn crash_child(path: &Path) {
 /// registration: on reopen every acknowledged address is at its acknowledged
 /// sequence, and the log holds nothing else but the child's next addresses in
 /// order (spec 9.3 "durable (fsync)", scenario 14).
+///
+/// The child registers only when the parent says so, one address per "go".
+/// After a random number of acknowledgements the parent sends one last go and
+/// kills the child after a random delay of up to 2 ms, so the kill lands
+/// before, during or after that last registration's commit. At most that one
+/// registration can then be in the log beyond the acknowledgements read.
 #[test]
 fn acknowledged_registrations_survive_a_process_crash() {
     if let Some(path) = std::env::var_os(CRASH_CHILD) {
         crash_child(Path::new(&path));
         return;
     }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let mut random = seed | 1;
+    for round in 0..CRASH_ROUNDS {
+        let acks = 50 + xorshift(&mut random) % 250;
+        // A quarter of the kills are immediate, a quarter within a
+        // registration's time on a fast disk, the rest within 2 ms.
+        let delay = Duration::from_micros(match xorshift(&mut random) % 4 {
+            0 => 0,
+            1 => xorshift(&mut random) % 50,
+            _ => xorshift(&mut random) % 2_000,
+        });
+        let context = format!("seed {seed}, round {round}: {acks} acks, kill after {delay:?}");
+        crash_round(acks, delay, &context);
+    }
+}
+
+fn crash_round(acks: u64, delay: Duration, context: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = store_path(&dir);
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([CRASH_TEST, "--exact", "--nocapture", "--test-threads=1"])
         .env(CRASH_CHILD, &path)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut acknowledged: Vec<(u64, u64)> = Vec::new();
+    let mut go = child.stdin.take().unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    for line in lines.by_ref() {
-        if let Some(ack) = parse_ack(&line.unwrap()) {
-            acknowledged.push(ack);
-            if acknowledged.len() == 300 {
-                child.kill().unwrap();
-                break;
+    let mut acknowledged: Vec<(u64, u64)> = Vec::new();
+    while (acknowledged.len() as u64) < acks {
+        go.write_all(b"g").unwrap();
+        go.flush().unwrap();
+        // The test harness's own lines ("running 1 test", "test ... ") and
+        // the blank line before each acknowledgement are skipped.
+        let ack = loop {
+            let line = lines
+                .next()
+                .unwrap_or_else(|| panic!("{context}: the child stopped"))
+                .unwrap();
+            if let Some(ack) = parse_ack(&line) {
+                break ack;
             }
-        }
+        };
+        acknowledged.push(ack);
     }
-    // Acknowledgements already in the pipe when the child died count too; a
-    // line cut short by the kill does not parse and is not one.
+    // One last registration, killed somewhere in its course.
+    go.write_all(b"g").unwrap();
+    go.flush().unwrap();
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "{context}: the child was killed");
+    // Its acknowledgement counts if it was written before the kill; a line
+    // cut short by the kill does not parse and is not one.
     for line in lines {
         let Ok(line) = line else { break };
         if let Some(ack) = parse_ack(&line) {
             acknowledged.push(ack);
         }
     }
-    let status = child.wait().unwrap();
-    assert!(!status.success(), "the child was killed, not finished");
-    assert!(acknowledged.len() >= 300);
+    assert!(acknowledged.len() as u64 <= acks + 1, "{context}");
     assert!(
         dir.path().join(format!("{STORE_FILE}-wal")).exists(),
-        "the child never closed the store"
+        "{context}: the child never closed the store"
     );
 
     let store = open(&path);
     let log_sequence = store.log_sequence().unwrap();
-    for (index, sequence) in &acknowledged {
-        assert_eq!(index, sequence);
+    for (position, (index, sequence)) in acknowledged.iter().enumerate() {
+        assert_eq!(*index, position as u64, "{context}");
+        assert_eq!(index, sequence, "{context}");
         let registration = store.lookup(&address(5, *index).digest()).unwrap();
-        assert_eq!(registration.map(|r| r.sequence), Some(*sequence));
+        assert_eq!(
+            registration.map(|r| r.sequence),
+            Some(*sequence),
+            "{context}"
+        );
     }
-    assert!(log_sequence >= acknowledged.len() as u64);
-    // At most the one registration in flight when the kill landed is in the
-    // log without an acknowledgement.
-    assert!(log_sequence <= acknowledged.len() as u64 + 1);
+    let acknowledged = acknowledged.len() as u64;
+    assert!(
+        log_sequence >= acknowledged,
+        "{context}: {log_sequence} entries"
+    );
+    // Only the registration in flight at the kill may be in the log without an
+    // acknowledgement.
+    assert!(
+        log_sequence <= acknowledged + 1,
+        "{context}: {log_sequence} entries for {acknowledged} acknowledgements"
+    );
     assert_log(&store, &addresses(5, 0..log_sequence));
+    eprintln!("{context}: {acknowledged} acknowledged, {log_sequence} in the log");
+}
+
+/// Xorshift64, for the crash test's random points.
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
 }
 
 fn parse_ack(line: &str) -> Option<(u64, u64)> {
