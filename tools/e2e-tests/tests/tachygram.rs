@@ -888,43 +888,148 @@ fn sha2_digest(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Scenario 6: tachygrams ground so that every seed overflows one row force
-/// an extra segment; every entry remains retrievable, the overflowing row's
-/// entries split between the segments.
-#[tokio::test(flavor = "multi_thread")]
-async fn forced_overflow_keeps_every_entry_retrievable() {
+// ---------------------------------------------------------------------------
+// Scenario 6: forced overflow.
+
+/// Scenario 6 runs as this many tests (`forced_overflow_slices!`), one per
+/// slice of the scope's tachygrams ([`overflow_slice`]); each starts its own
+/// topology on the same chain ([`shared_overflow_chain`]). Each slice
+/// sends about 1,310 queries (two per distinct row, about 61 ms of CPU each
+/// on the two sides); slices that size stay near 17 s in the correctness
+/// run, where every end-to-end binary's scenario 6 runs at once, under the
+/// 25 s budget of [`Budget`].
+const OVERFLOW_SLICES: usize = 6;
+/// Row queries in flight at once in scenario 6's batched lookups. Alone,
+/// more in flight (or more executing) finishes no sooner, and in the
+/// correctness run it only takes CPU from the other test binaries.
+const OVERFLOW_PARALLEL: usize = 12;
+
+/// [`options`] with admission for [`OVERFLOW_PARALLEL`] queries in flight
+/// from one client, eight of them executing at once.
+fn overflow_options() -> TopologyOptions {
+    options().query_setting(
+        "admission",
+        json!({"executing": 8, "waiting": 64, "wait_ms": 10000, "per_client": 16}),
+    )
+}
+
+/// Scenario 6's chain, the same in every slice: epoch 0 lists every ground
+/// tachygram (`SLOTS + 1` keys sharing one row under each seed, so no seed
+/// fits, spec 6.4) in four blocks of proof stamps, and six other tachygrams
+/// in block 15.
+#[derive(Clone)]
+struct OverflowChain {
+    chain: SyntheticChain,
+    genesis: BlockHash,
+    /// The ground tachygrams, one group per seed.
+    groups: Vec<Vec<[u8; 32]>>,
+    /// The ground tachygrams, sorted.
+    ground: Vec<[u8; 32]>,
+    /// Tachygrams the chain never lists: misses.
+    fresh: Vec<[u8; 32]>,
+}
+
+/// [`overflow_chain`], built once per test process and cloned for each
+/// slice. The chain is deterministic, so each slice gets exactly the chain
+/// it would build itself; the slices after the first skip the grind.
+fn shared_overflow_chain() -> OverflowChain {
+    static CHAIN: std::sync::OnceLock<OverflowChain> = std::sync::OnceLock::new();
+    CHAIN.get_or_init(overflow_chain).clone()
+}
+
+fn overflow_chain() -> OverflowChain {
+    let mut chain = SyntheticChain::new(filler_config(6));
+    let genesis = BlockHash::from_protocol_bytes(chain.genesis_hash());
+    let groups = grind_overflow(&genesis, 0);
+    let mut ground: Vec<[u8; 32]> = groups.iter().flatten().copied().collect();
+    ground.sort();
+    ground.dedup();
+    assert_eq!(
+        ground.len(),
+        groups.len() * (Product::Tachygram.slots() + 1)
+    );
+    extend(&mut chain, 9, &[]);
+    // Epoch 0 (heights 8-23): four blocks of proof stamps of up to 1,700
+    // ground tachygrams each, interleaved with pointer stamps.
+    for block_keys in ground.chunks(ground.len().div_ceil(4)) {
+        let mut block = BlockSpec::new().tx(TxSpec::tachyon(1));
+        for stamp in block_keys.chunks(1700) {
+            block = block
+                .tx(TxSpec::tachyon(3).proof(stamp.to_vec()))
+                .tx(TxSpec::tachyon(1).pointer());
+        }
+        chain.append(block);
+    }
+    extend(&mut chain, 30, &[(15, &[6])]);
+    let fresh = chain.fresh_tachygrams(6);
+    OverflowChain {
+        chain,
+        genesis,
+        groups,
+        ground,
+        fresh,
+    }
+}
+
+/// The slice of scenario 6 a tachygram belongs to: its row under seed 0
+/// (`row0`, the row of segment 0 and, segment 1 being filled under seed 0
+/// too, of segment 1), modulo [`OVERFLOW_SLICES`]. Every tachygram is in
+/// exactly one slice, and tachygrams sharing a row share a slice, so the
+/// slices together query each row of the scope's tachygrams once.
+fn overflow_slice_of(row0: u32) -> usize {
+    row0 as usize % OVERFLOW_SLICES
+}
+
+/// The probes of `records` (every record of the scope, as the oracle lists
+/// them, in ordinal order) in slice `slice` ([`overflow_slice_of`]).
+fn overflow_slice(records: &[Probe], row0: impl Fn(&[u8; 32]) -> u32, slice: usize) -> Vec<Probe> {
+    records
+        .iter()
+        .filter(|p| overflow_slice_of(row0(&p.tachygram)) == slice)
+        .copied()
+        .collect()
+}
+
+/// Scenario 6, slice `slice` of [`OVERFLOW_SLICES`]: tachygrams ground so
+/// that every seed overflows one row ([`overflow_chain`]) force an extra
+/// segment. Every slice checks, on its own topology, that the slices
+/// partition the oracle's records of the scope; that the scope has one
+/// bucket of two segments, segment 0 under seed 0 and segment 1 holding the
+/// overflowing row's excess, also under seed 0; and the publisher's
+/// overflow metric. It then looks up every tachygram of its slice and six
+/// tachygrams the chain never lists on the query host's public listener in
+/// one batched lookup ([`Client::lookup_many`]). Every tachygram's plan
+/// queries both segments, at its row under seed 0; each distinct row of the
+/// plans is queried privately once and its decoded row shared by every
+/// tachygram in it, and the client sends exactly that many queries. Every
+/// answer is judged against the oracle: each tachygram of the slice is
+/// found with its exact record, and each unlisted one is absent. The slice
+/// holding the overflowing row also checks that each of the row's records
+/// is found in the segment its ordinal rank puts it in, and that the row
+/// fills segment 0 and spills the rest; the other slices check that they
+/// hold none of it. Over all slices every tachygram of the scope, each
+/// ground tachygram included, is looked up and found.
+async fn forced_overflow(slice: usize) {
     let _serial = exclusive().await;
     let budget = Budget::start();
     budget
         .run(async {
-            let mut chain = SyntheticChain::new(filler_config(6));
-            let genesis = BlockHash::from_protocol_bytes(chain.genesis_hash());
-            let groups = grind_overflow(&genesis, 0);
-            let mut ground: Vec<[u8; 32]> = groups.iter().flatten().copied().collect();
-            ground.sort();
-            ground.dedup();
-            assert_eq!(
-                ground.len(),
-                groups.len() * (Product::Tachygram.slots() + 1)
-            );
-            extend(&mut chain, 9, &[]);
-            // Epoch 0 (heights 8-23): four blocks of proof stamps of up to
-            // 1,700 ground tachygrams each, interleaved with pointer stamps.
-            for block_keys in ground.chunks(ground.len().div_ceil(4)) {
-                let mut block = BlockSpec::new().tx(TxSpec::tachyon(1));
-                for stamp in block_keys.chunks(1700) {
-                    block = block
-                        .tx(TxSpec::tachyon(3).proof(stamp.to_vec()))
-                        .tx(TxSpec::tachyon(1).pointer());
-                }
-                chain.append(block);
-            }
-            extend(&mut chain, 30, &[(15, &[6])]);
-            let fresh = chain.fresh_tachygrams(6);
+            let OverflowChain {
+                chain,
+                genesis,
+                groups,
+                ground,
+                fresh,
+            } = shared_overflow_chain();
             let oracle = TachygramOracle::new(&chain, u64::from(EPOCH_LENGTH));
             let anchor = oracle.anchor();
             let records = oracle.records(0).to_vec();
             assert_eq!(records.len(), ground.len() + 6);
+            let (_, last) = oracle.coverage(0, anchor).expect("epoch 0 is listed");
+            assert!(
+                records.iter().all(|r| u64::from(r.blk_height) <= last),
+                "every record of epoch 0 is covered at the anchor"
+            );
 
             // The row that overflows under seed 0, the seed buckets and
             // segment 0 are assigned under when no seed fits (spec 6.4).
@@ -949,10 +1054,34 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                 })
                 .collect();
             let spilled = hot_records.len() - Product::Tachygram.slots();
+            let hot_slice = overflow_slice_of(hot);
+
+            // Every tachygram of the scope: the overflowing row's, every other
+            // ground tachygram and the six of block 15's proof stamp. The
+            // slices partition them: their concatenation, sorted, is the
+            // scope's tachygrams, sorted (the tachygrams are distinct, so one
+            // in two slices would show).
+            let all: Vec<Probe> = records
+                .iter()
+                .map(|r| Probe {
+                    epoch: 0,
+                    tachygram: r.tachygram,
+                })
+                .collect();
+            let mut sorted: Vec<[u8; 32]> = all.iter().map(|p| p.tachygram).collect();
+            sorted.sort();
+            assert!(ground.iter().all(|g| sorted.binary_search(g).is_ok()));
+            let mut union: Vec<[u8; 32]> = (0..OVERFLOW_SLICES)
+                .flat_map(|i| overflow_slice(&all, row0, i))
+                .map(|p| p.tachygram)
+                .collect();
+            union.sort();
+            assert_eq!(union, sorted, "the slices partition the scope's tachygrams");
+            let mine = overflow_slice(&all, row0, slice);
 
             let t = Topology::start(
                 chain,
-                options(),
+                overflow_options(),
                 publisher_binary(),
                 query_binary(),
                 &budget,
@@ -973,39 +1102,29 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                 "no seed fits: segment 0 is filled under seed 0"
             );
             assert_eq!(segments[1].2, spilled as u64, "the hot row's excess spills");
+            assert_eq!(
+                segments[1].1, 0,
+                "the excess, from one row under seed 0, fits under seed 0"
+            );
 
-            // Every entry of the overflowing row, a sample of the others, and misses.
-            let others: Vec<Probe> = records
-                .iter()
-                .filter(|r| row0(&r.tachygram) != hot)
-                .map(|r| Probe {
-                    epoch: 0,
-                    tachygram: r.tachygram,
-                })
-                .collect();
-            let mut lookups = hot_records.clone();
-            lookups.extend(Sampler::new(6).sample(&others, 60));
-            lookups.extend(fresh.iter().map(|tachygram| Probe {
+            // Every tachygram of this slice, and misses, in one batch.
+            let mut probes = mine.clone();
+            probes.extend(fresh.iter().map(|tachygram| Probe {
                 epoch: 0,
                 tachygram: *tachygram,
             }));
-            let outcomes: Vec<(Probe, LookupOutcome)> = stream::iter(lookups.iter().copied())
-                .map(|probe| {
-                    let (wallet, map) = (wallet.clone(), map.clone());
-                    async move {
-                        let outcome = wallet
-                            .lookup(&map, ScopeSelector::Index(0), &probe.tachygram)
-                            .await
-                            .unwrap_or_else(|e| panic!("lookup failed: {}", describe(&e)));
-                        (probe, outcome)
-                    }
-                })
-                .buffered(2 * PARALLEL)
-                .collect()
-                .await;
+            let batch: Vec<[u8; 32]> = probes.iter().map(|p| p.tachygram).collect();
+            let sent = wallet.stats().queries;
+            let outcomes = wallet
+                .lookup_many(&map, ScopeSelector::Index(0), &batch, OVERFLOW_PARALLEL)
+                .await
+                .unwrap_or_else(|e| panic!("lookup failed: {}", describe(&e)));
+            let sent = wallet.stats().queries - sent;
+            assert_eq!(outcomes.len(), probes.len());
             let mut tally = Tally::default();
             let mut in_segment = [0usize; 2];
-            for (probe, outcome) in &outcomes {
+            let mut rows = BTreeSet::new();
+            for (probe, outcome) in probes.iter().zip(&outcomes) {
                 tally += judge(&map, &oracle, anchor, *probe, outcome);
                 let answer = outcome.answer().unwrap();
                 assert_eq!(
@@ -1013,6 +1132,14 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     2,
                     "every segment of the bucket is queried"
                 );
+                assert!(
+                    answer
+                        .queries
+                        .iter()
+                        .all(|q| q.row == row0(&probe.tachygram)),
+                    "both segments are queried at the key's row under seed 0"
+                );
+                rows.extend(answer.queries.iter().map(|q| (q.segment, q.row)));
                 // The hot row's entries in ordinal order (spec 8.2: height,
                 // transaction index, position in the stamp, the oracle's
                 // record order): the first SLOTS stay in segment 0, the rest
@@ -1034,13 +1161,31 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     in_segment[hit.segment as usize] += 1;
                 }
             }
-            assert_eq!(tally.found, hot_records.len() + 60);
-            assert_eq!(tally.absent, fresh.len());
             assert_eq!(
-                in_segment,
-                [Product::Tachygram.slots(), spilled],
-                "the overflowing row fills segment 0 and spills the rest"
+                tally.found,
+                mine.len(),
+                "every tachygram of the slice is found"
             );
+            assert_eq!(tally.absent, fresh.len());
+            assert_eq!(sent, rows.len() as u64, "each distinct row is queried once");
+            eprintln!(
+                "forced overflow, slice {slice}: {} lookups, {sent} queries, {:?}",
+                batch.len(),
+                budget.elapsed()
+            );
+            if slice == hot_slice {
+                assert_eq!(
+                    in_segment,
+                    [Product::Tachygram.slots(), spilled],
+                    "the overflowing row fills segment 0 and spills the rest"
+                );
+            } else {
+                assert_eq!(
+                    in_segment,
+                    [0, 0],
+                    "the overflowing row is in another slice"
+                );
+            }
             let metrics = t.publisher.metrics().await;
             assert!(
                 metrics
@@ -1050,6 +1195,44 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
             );
         })
         .await
+}
+
+/// One `#[tokio::test]` per slice of scenario 6, each running
+/// [`forced_overflow`] on its slice. The listed slices must be exactly
+/// `0..OVERFLOW_SLICES` in order (checked at compile time), so every slice,
+/// and with them every tachygram of the scope, has its test.
+macro_rules! forced_overflow_slices {
+    ($($name:ident: $slice:literal),+ $(,)?) => {
+        $(
+            #[doc = concat!(
+                "Scenario 6, slice ",
+                stringify!($slice),
+                " of the scope's tachygrams ([`overflow_slice`], [`forced_overflow`])."
+            )]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                forced_overflow($slice).await
+            }
+        )+
+        const _: () = {
+            let slices = [$($slice),+];
+            assert!(slices.len() == OVERFLOW_SLICES);
+            let mut i = 0;
+            while i < slices.len() {
+                assert!(slices[i] == i);
+                i += 1;
+            }
+        };
+    };
+}
+
+forced_overflow_slices! {
+    forced_overflow_keeps_every_entry_retrievable_slice_0: 0,
+    forced_overflow_keeps_every_entry_retrievable_slice_1: 1,
+    forced_overflow_keeps_every_entry_retrievable_slice_2: 2,
+    forced_overflow_keeps_every_entry_retrievable_slice_3: 3,
+    forced_overflow_keeps_every_entry_retrievable_slice_4: 4,
+    forced_overflow_keeps_every_entry_retrievable_slice_5: 5,
 }
 
 /// Scenario 8: a reorg inside the open newest scope gives a new generation in

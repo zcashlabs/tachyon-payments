@@ -24,7 +24,7 @@ use tachyon_pir_cli::{Client, ClientError, LookupOutcome, MapView, Mount, ScopeS
 use tachyon_pir_e2e_tests::budget::Budget;
 use tachyon_pir_e2e_tests::memo_checks::{
     Probe, Served, Tally, chain_scope, check_head, check_listing, check_lookups, check_map,
-    grind_overflow, judge, key_probes, lookups, probes, row_under_seed0, scope_probes, sessions,
+    grind_overflow, judge, key_probes, probes, row_under_seed0, scope_probes, sessions,
     spawn_prober,
 };
 use tachyon_pir_e2e_tests::memo_oracle::{Family, MemoOracle};
@@ -776,55 +776,160 @@ async fn incremental_publication_fetches_only_changed_objects() {
         .await
 }
 
-/// Scenario 6: follow-up tags ground so that every seed overflows one row
-/// force an extra segment; every entry remains retrievable, the overflowing
-/// row's entries split between the segments in ordinal order, and a key
-/// repeated across both segments returns all its entries in ordinal order.
-#[tokio::test(flavor = "multi_thread")]
-async fn forced_overflow_keeps_every_entry_retrievable() {
+// ---------------------------------------------------------------------------
+// Scenario 6: forced overflow.
+
+/// Scenario 6 runs as this many tests (`forced_overflow_slices!`), one per
+/// slice of the scope's keys ([`overflow_slice`]); each starts its own
+/// topology on the same chain ([`shared_overflow_chain`]). Each slice
+/// sends about 1,200 queries (two per distinct row, about 61 ms of CPU each
+/// on the two sides); slices that size stay near 17 s in the correctness
+/// run, where every end-to-end binary's scenario 6 runs at once, under the
+/// 25 s budget of [`Budget`].
+const OVERFLOW_SLICES: usize = 4;
+/// Row queries in flight at once in scenario 6's batched lookups. Alone,
+/// more in flight (or more executing) finishes no sooner, and in the
+/// correctness run it only takes CPU from the other test binaries.
+const OVERFLOW_PARALLEL: usize = 12;
+
+/// [`options`] with admission for [`OVERFLOW_PARALLEL`] queries in flight
+/// from one client, eight of them executing at once.
+fn overflow_options() -> TopologyOptions {
+    options().query_setting(
+        "admission",
+        json!({"executing": 8, "waiting": 64, "wait_ms": 10000, "per_client": 16}),
+    )
+}
+
+/// Scenario 6's chain, the same in every slice: epoch 0 holds a follow-up
+/// for every ground key (`SLOTS + 1` keys sharing one row under each seed,
+/// so no seed fits, spec 6.4), a ground key of the seed-0 group repeated at
+/// the start and the end of the epoch's entries, and six other follow-ups.
+#[derive(Clone)]
+struct OverflowChain {
+    chain: SyntheticChain,
+    genesis: BlockHash,
+    groups: Vec<Vec<[u8; 16]>>,
+    ground: BTreeSet<[u8; 16]>,
+    repeated: [u8; 16],
+    /// Keys never authored: misses.
+    fresh: Vec<[u8; 16]>,
+}
+
+/// [`overflow_chain`], built once per test process and cloned for each
+/// slice. The chain is deterministic, so each slice gets exactly the chain
+/// it would build itself; the slices after the first skip the grind.
+fn shared_overflow_chain() -> OverflowChain {
+    static CHAIN: std::sync::OnceLock<OverflowChain> = std::sync::OnceLock::new();
+    CHAIN.get_or_init(overflow_chain).clone()
+}
+
+fn overflow_chain() -> OverflowChain {
+    let product = Product::Memo;
+    let slots = Family::Memo.slots();
+    assert_eq!(slots, product.slots());
+    let mut chain = SyntheticChain::new(filler_config(6));
+    let genesis = BlockHash::from_protocol_bytes(chain.genesis_hash());
+    let groups = grind_overflow(product, &genesis, 0);
+    let ground: BTreeSet<[u8; 16]> = groups.iter().flatten().copied().collect();
+    assert_eq!(ground.len(), groups.len() * (slots + 1));
+    // A ground key of the seed-0 group, repeated at the start and the end of
+    // the epoch's entries.
+    let repeated = groups[0][1];
+    let mut tags: Vec<[u8; 32]> = Vec::new();
+    for key in &ground {
+        tags.push(tag_with_key16(chain.rng(), *key));
+    }
+    let repeat = |chain: &mut SyntheticChain| {
+        let tag = tag_with_key16(chain.rng(), repeated);
+        fu(chain, tag)
+    };
+    let mut entries = vec![repeat(&mut chain), repeat(&mut chain)];
+    for tag in tags {
+        entries.push(fu(&mut chain, tag));
+    }
+    entries.push(repeat(&mut chain));
+    entries.push(repeat(&mut chain));
+    fill_to(&mut chain, 8);
+    // Epoch 0 (heights 8-23): four blocks of ground follow-ups.
+    let quarter = entries.len().div_ceil(4);
+    let chunks: Vec<Vec<AuthoredEntry>> = entries.chunks(quarter).map(|c| c.to_vec()).collect();
+    for chunk in chunks {
+        let spec = chain.entries_block(chunk);
+        let height = chain.tip_height() + 1;
+        put(&mut chain, height, spec);
+    }
+    let b = fus(&mut chain, 6);
+    put(&mut chain, 15, block(vec![b]));
+    fill_to(&mut chain, 30);
+    let fresh = fresh_keys(&mut chain, 6);
+    OverflowChain {
+        chain,
+        genesis,
+        groups,
+        ground,
+        repeated,
+        fresh,
+    }
+}
+
+/// The slice of scenario 6 a key belongs to: its row under seed 0 (`row0`,
+/// the row of segment 0 and, segment 1 being filled under seed 0 too, of
+/// segment 1), modulo [`OVERFLOW_SLICES`]. Every key is in exactly one
+/// slice, and keys sharing a row share a slice, so the slices together
+/// query each row of the scope's keys once.
+fn overflow_slice_of(row0: u32) -> usize {
+    row0 as usize % OVERFLOW_SLICES
+}
+
+/// The keys of `keys` (every key of the scope, as the oracle lists them, in
+/// that order) in slice `slice` ([`overflow_slice_of`]).
+fn overflow_slice(
+    keys: &[[u8; 16]],
+    row0: impl Fn(&[u8; 16]) -> u32,
+    slice: usize,
+) -> Vec<[u8; 16]> {
+    keys.iter()
+        .filter(|k| overflow_slice_of(row0(k)) == slice)
+        .copied()
+        .collect()
+}
+
+/// Scenario 6, slice `slice` of [`OVERFLOW_SLICES`]: follow-up tags ground
+/// so that every seed overflows one row ([`overflow_chain`]) force an extra
+/// segment. Every slice checks, on its own topology, that the slices
+/// partition the oracle's keys of the scope; that the scope has one bucket
+/// of two segments, segment 0 under seed 0 and segment 1 holding the
+/// overflowing row's excess, also under seed 0; that a ground key repeated
+/// at both ends of the epoch has its entries on both sides of the split;
+/// and the publisher's overflow metric. It then looks up every key of its
+/// slice and six fresh keys on the query host's public listener in one
+/// batched lookup ([`Client::lookup_many`]). Every key's plan queries both
+/// segments, at the key's row under seed 0; each distinct row of the plans
+/// is queried privately once and its decoded row shared by every key in it,
+/// and the client sends exactly that many queries. Every answer is judged
+/// against the oracle: each key of the slice is found with all its entries
+/// in ordinal order, and each fresh key is absent. The slice holding the
+/// overflowing row also checks that each of the row's keys is found in the
+/// segments its ordinals put it in, and that the row fills segment 0 and
+/// spills the rest, the repeated key included; the other slices check that
+/// they hold none of it. Over all slices every key of the scope, each
+/// ground key included, is looked up and found.
+async fn forced_overflow(slice: usize) {
     let _serial = exclusive().await;
     let budget = Budget::start();
     budget
         .run(async {
             let product = Product::Memo;
             let slots = Family::Memo.slots();
-            assert_eq!(slots, product.slots());
-            let mut chain = SyntheticChain::new(filler_config(6));
-            let genesis = BlockHash::from_protocol_bytes(chain.genesis_hash());
-            let groups = grind_overflow(product, &genesis, 0);
-            let ground: BTreeSet<[u8; 16]> = groups.iter().flatten().copied().collect();
-            assert_eq!(ground.len(), groups.len() * (slots + 1));
-            // A ground key of the seed-0 group, repeated at the start and the
-            // end of the epoch's entries.
-            let repeated = groups[0][1];
-            let mut tags: Vec<[u8; 32]> = Vec::new();
-            for key in &ground {
-                tags.push(tag_with_key16(chain.rng(), *key));
-            }
-            let repeat = |chain: &mut SyntheticChain| {
-                let tag = tag_with_key16(chain.rng(), repeated);
-                fu(chain, tag)
-            };
-            let mut entries = vec![repeat(&mut chain), repeat(&mut chain)];
-            for tag in tags {
-                entries.push(fu(&mut chain, tag));
-            }
-            entries.push(repeat(&mut chain));
-            entries.push(repeat(&mut chain));
-            fill_to(&mut chain, 8);
-            // Epoch 0 (heights 8-23): four blocks of ground follow-ups.
-            let quarter = entries.len().div_ceil(4);
-            let chunks: Vec<Vec<AuthoredEntry>> =
-                entries.chunks(quarter).map(|c| c.to_vec()).collect();
-            for chunk in chunks {
-                let spec = chain.entries_block(chunk);
-                let height = chain.tip_height() + 1;
-                put(&mut chain, height, spec);
-            }
-            let b = fus(&mut chain, 6);
-            put(&mut chain, 15, block(vec![b]));
-            fill_to(&mut chain, 30);
-            let fresh = fresh_keys(&mut chain, 6);
+            let OverflowChain {
+                chain,
+                genesis,
+                groups,
+                ground,
+                repeated,
+                fresh,
+            } = shared_overflow_chain();
             let oracle = oracle(&chain);
             let anchor = oracle.anchor();
             let records = oracle.scope_entries(0, anchor);
@@ -845,10 +950,29 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     .expect("a hot-row entry");
                 usize::from(rank >= slots)
             };
+            let hot_keys: BTreeSet<[u8; 16]> = hot_entries.iter().map(|r| r.key16()).collect();
+            assert!(hot_keys.contains(&repeated));
+            let hot_slice = overflow_slice_of(hot);
+
+            // Every key of the scope: the overflowing row's, every other
+            // ground key and the six other follow-ups. The slices partition
+            // them: their concatenation, sorted, is the scope's keys, sorted
+            // (the keys are distinct, so a key in two slices would show).
+            let keys = oracle.keys(0, anchor);
+            assert_eq!(keys.len(), ground.len() + 6);
+            assert!(ground.iter().all(|k| keys.contains(k)));
+            let mut union: Vec<[u8; 16]> = (0..OVERFLOW_SLICES)
+                .flat_map(|i| overflow_slice(&keys, row0, i))
+                .collect();
+            union.sort();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(union, sorted, "the slices partition the scope's keys");
+            let mine = overflow_slice(&keys, row0, slice);
 
             let t = Topology::start(
                 chain,
-                options(),
+                overflow_options(),
                 publisher_binary(),
                 query_binary(),
                 &budget,
@@ -869,25 +993,26 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                 "no seed fits: segment 0 is filled under seed 0"
             );
             assert_eq!(segments[1].2, spilled as u64, "the hot row's excess spills");
+            assert_eq!(
+                segments[1].1, 0,
+                "the excess, from one row under seed 0, fits under seed 0"
+            );
 
-            // Every key of the overflowing row, a sample of the others, and misses.
-            let hot_keys: BTreeSet<[u8; 16]> = hot_entries.iter().map(|r| r.key16()).collect();
-            let others: Vec<Probe> = oracle
-                .keys(0, anchor)
-                .into_iter()
-                .filter(|k| !hot_keys.contains(k))
-                .map(|key16| Probe { index: 0, key16 })
-                .collect();
-            let mut lookups_to_make = key_probes(0, hot_keys.iter().copied());
-            lookups_to_make.extend(Sampler::new(6).sample(&others, 60));
-            lookups_to_make.extend(key_probes(0, fresh.iter().copied()));
-            let outcomes = lookups(&wallet, &map, &lookups_to_make, 2 * PARALLEL).await;
+            // Every key of this slice, and misses, in one batch.
+            let mut probes = key_probes(0, mine.iter().copied());
+            probes.extend(key_probes(0, fresh.iter().copied()));
+            let batch: Vec<[u8; 16]> = probes.iter().map(|p| p.key16).collect();
+            let sent = wallet.stats().queries;
+            let outcomes = wallet
+                .lookup_many(&map, ScopeSelector::Index(0), &batch, OVERFLOW_PARALLEL)
+                .await
+                .unwrap_or_else(|e| panic!("lookup failed: {}", describe(&e)));
+            let sent = wallet.stats().queries - sent;
+            assert_eq!(outcomes.len(), probes.len());
             let mut tally = Tally::default();
             let mut in_segment = [0usize; 2];
-            for (probe, outcome) in &outcomes {
-                let outcome = outcome
-                    .as_ref()
-                    .unwrap_or_else(|e| panic!("lookup failed: {}", describe(e)));
+            let mut rows = BTreeSet::new();
+            for (probe, outcome) in probes.iter().zip(&outcomes) {
                 tally += judge(&map, &oracle, anchor, *probe, outcome);
                 let answer = outcome.answer().unwrap();
                 assert_eq!(
@@ -895,6 +1020,11 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     2,
                     "every segment of the bucket is queried"
                 );
+                assert!(
+                    answer.queries.iter().all(|q| q.row == row0(&probe.key16)),
+                    "both segments are queried at the key's row under seed 0"
+                );
+                rows.extend(answer.queries.iter().map(|q| (q.segment, q.row)));
                 if hot_keys.contains(&probe.key16) {
                     let mut wanted = [0usize; 2];
                     for entry in oracle.expected(0, &probe.key16, anchor) {
@@ -911,13 +1041,28 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
                     in_segment[1] += wanted[1];
                 }
             }
-            assert_eq!(tally.found, hot_keys.len() + 60);
+            assert_eq!(tally.found, mine.len(), "every key of the slice is found");
             assert_eq!(tally.absent, fresh.len());
-            assert_eq!(
-                in_segment,
-                [slots, spilled],
-                "the overflowing row fills segment 0 and spills the rest"
+            assert_eq!(sent, rows.len() as u64, "each distinct row is queried once");
+            eprintln!(
+                "forced overflow, slice {slice}: {} lookups, {sent} queries, {:?}",
+                batch.len(),
+                budget.elapsed()
             );
+            if slice == hot_slice {
+                assert!(hot_keys.iter().all(|k| mine.contains(k)));
+                assert_eq!(
+                    in_segment,
+                    [slots, spilled],
+                    "the overflowing row fills segment 0 and spills the rest"
+                );
+            } else {
+                assert_eq!(
+                    in_segment,
+                    [0, 0],
+                    "the overflowing row is in another slice"
+                );
+            }
             let repeated_entries = oracle.expected(0, &repeated, anchor);
             assert_eq!(repeated_entries.len(), 5);
             let split: Vec<usize> = repeated_entries
@@ -938,6 +1083,42 @@ async fn forced_overflow_keeps_every_entry_retrievable() {
             .await;
         })
         .await
+}
+
+/// One `#[tokio::test]` per slice of scenario 6, each running
+/// [`forced_overflow`] on its slice. The listed slices must be exactly
+/// `0..OVERFLOW_SLICES` in order (checked at compile time), so every slice,
+/// and with them every key of the scope, has its test.
+macro_rules! forced_overflow_slices {
+    ($($name:ident: $slice:literal),+ $(,)?) => {
+        $(
+            #[doc = concat!(
+                "Scenario 6, slice ",
+                stringify!($slice),
+                " of the scope's keys ([`overflow_slice`], [`forced_overflow`])."
+            )]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                forced_overflow($slice).await
+            }
+        )+
+        const _: () = {
+            let slices = [$($slice),+];
+            assert!(slices.len() == OVERFLOW_SLICES);
+            let mut i = 0;
+            while i < slices.len() {
+                assert!(slices[i] == i);
+                i += 1;
+            }
+        };
+    };
+}
+
+forced_overflow_slices! {
+    forced_overflow_keeps_every_entry_retrievable_slice_0: 0,
+    forced_overflow_keeps_every_entry_retrievable_slice_1: 1,
+    forced_overflow_keeps_every_entry_retrievable_slice_2: 2,
+    forced_overflow_keeps_every_entry_retrievable_slice_3: 3,
 }
 
 /// Scenario 7: every malformation the fixtures author, and hand-authored
