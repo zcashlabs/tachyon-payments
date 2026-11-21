@@ -1,11 +1,13 @@
 ![tachyon-payments by Zcash Labs](./banner.png)
 
-# tachyon-payments [![X][x-badge]][x]
+# tachyon-payments [![Docs][docs-badge]][docs] [![X][x-badge]][x]
 
+[docs]: https://tachyon.fastz.cash
+[docs-badge]: https://img.shields.io/badge/docs-tachyon.fastz.cash-f4b728
 [x]: https://x.com/zcashlabs
 [x-badge]: https://img.shields.io/twitter/follow/zcashlabs
 
-Private-retrieval (PIR) services for the Tachyon payment protocol on [Zcash](https://z.cash), built by [Zcash Labs](https://zcashlabs.com). A wallet uses them to fetch the data it needs to receive payments without revealing to the server which entry it is querying.
+Private-retrieval (PIR) services for the Tachyon payment protocol on [Zcash](https://z.cash), built by [Zcash Labs](https://zcashlabs.com). Full documentation and operator guides are published at **[tachyon.fastz.cash](https://tachyon.fastz.cash)**. A wallet uses these services to fetch the data it needs to receive payments without revealing to the server which entry it is querying.
 
 Four products, each served as bucket-row PIR tables:
 
@@ -58,7 +60,7 @@ See [AGENTS.md](AGENTS.md) for development rules, dependency boundaries, and tes
 
 ## Documentation
 
-The documentation site uses [Vocs](https://vocs.dev) under `docs/`:
+Published at **[tachyon.fastz.cash](https://tachyon.fastz.cash)**. The site uses [Vocs](https://vocs.dev) under `docs/`:
 
 ```console
 cd docs
