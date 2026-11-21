@@ -15,6 +15,16 @@ Every table uses the `tachyon-4k8` geometry ([spec §6.1](https://github.com/zca
 
 If a bucket cannot place all its entries into 4,096 rows within `MAX_SEEDS = 64` deterministic seed retries, the bucket splits into up to `MAX_SEGMENTS = 8` segments ([spec §6.4](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#64-seeds-overflow-and-segments)). A client looking up a key in a multi-segment bucket queries every segment of that bucket.
 
+```mermaid
+flowchart LR
+    key["Key (key16 or tg32)"] --> hash["SHA-256(domain || genesis || scope || seed || key)"]
+    hash -->|"h[4..8] mod n_buckets"| bkt["Bucket b"]
+    hash -->|"h[0..4] mod 4096"| row["Row r (8,192 bytes)"]
+    bkt --> seg0["Segment 0 (4,096 rows)"]
+    bkt -.->|"if seed 0..63 overflows"| seg1["Segment 1..7"]
+    seg0 --> slots["Sorted entries + zero-padded tail"]
+```
+
 ### Open vs. sealed scopes
 
 - **Open scopes** (current epoch, open first-contact span, open registry chunk) are rebuilt on each publication as new data arrives.

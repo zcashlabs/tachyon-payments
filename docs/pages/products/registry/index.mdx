@@ -2,6 +2,24 @@
 
 The **registry** is an off-chain address directory (`H(addr) => pk || ek`) that lets a sender expand a recipient's short address `(chunk_id, digest)` into a full Tachyon payment address privately over PIR.
 
+```mermaid
+sequenceDiagram
+    participant R as Recipient Wallet
+    participant P as Registry Publisher
+    participant Q as Query Server
+    participant S as Sender Wallet
+
+    R->>P: GET /registry/v1/challenge
+    P-->>R: Stateless HMAC challenge + difficulty_bits
+    R->>R: Solve PoW bound to H(pk || ek)
+    R->>P: POST /registry/v1/register (challenge || nonce || pk || ek)
+    P-->>R: 200 { chunk_id, digest, visible_after_sequence }
+    P->>Q: Publish chunk PIR table
+    R-->>S: Share short address (chunk_id, digest)
+    S->>Q: Encrypted PIR query for row(digest[0..16])
+    Q-->>S: Encrypted 8 KiB row -> verify H(pk || ek) == digest
+```
+
 | Property | Value |
 | --- | --- |
 | Scope | Append-only chunk of `3,072` registrations (`scope_id = chunk_id`, from `0`) |

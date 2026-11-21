@@ -2,6 +2,23 @@
 
 The **memo** database lets a wallet privately fetch follow-up payment memos (`tag => ciphertext`) for an established sender–recipient pair, scoped per Tachyon epoch.
 
+```mermaid
+sequenceDiagram
+    participant S as Sender Wallet
+    participant Z as Zakura Chain
+    participant P as Publisher
+    participant Q as Query Server
+    participant R as Recipient Wallet
+
+    Note over S,R: Shared secret & next per-note tag already established
+    S->>Z: Broadcast V7 tx with TPM1 kind 0x01 (tag || ct)
+    Z->>P: Block ingested (epoch E)
+    P->>Q: Publish epoched memo PIR table
+    R->>Q: Encrypted PIR query for row(tag[0..16])
+    Q-->>R: Encrypted 8 KiB row (server learns nothing)
+    R->>R: Filter matching key16, AEAD-decrypt note opening
+```
+
 | Property | Value |
 | --- | --- |
 | Scope | One Tachyon epoch (`scope_id = epoch`) |

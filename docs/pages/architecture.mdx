@@ -1,13 +1,50 @@
 # Architecture
 
-`tachyon-payments` implements the server-side Private Information Retrieval (PIR) layer of the Tachyon payment protocol on Zcash. A wallet uses these services to fetch encrypted memos, first-contact handshakes, tachygrams, and recipient addresses without revealing to the server which entry it wants.
+`tachyon-payments` implements the server-side Private Information Retrieval (PIR) layer of the Tachyon payment protocol on Zcash, as outlined in the Tachyon Book's *Payment Protocol* design.
 
-## Two-Host Topology
+## Why PIR is Needed
 
-```text
-Zakura node ──JSON-RPC──▶ tachyon-pir-publisher ──HTTPS pull──▶ tachyon-pir-query-server ◀── wallets
-                              ▲
-                              └── wallets (registry writes only)
+Traditional shielded Zcash wallets discover incoming payments by downloading every encrypted note on chain and running **linear trial decryption** against their incoming viewing key (`ivk`). As throughput scales, linear scanning becomes too slow for bandwidth-limited mobile wallets and leaks sync metadata.
+
+Tachyon makes this even sharper by adopting **post-quantum ML-KEM** for note transmission:
+
+- In Orchard, diversified addresses share one elliptic-curve `ivk`, which is convenient for scanning but not quantum-private (a future quantum adversary who recovers `ivk` exposes every past and future note).
+- In Tachyon, each sender gets a freshly sampled payment address `addr = (pk, ek)` where `(ek, dk) ← ML-KEM.KeyGen()`. Without a single shared `ivk`, linear trial decryption would multiply by the number of per-sender `dk` keys in the wallet.
+
+**Tags + PIR solve both problems:** every encrypted memo is published on chain with a fresh, unlinkable **tag** predictable only to the sender and recipient. Instead of scanning the chain, the wallet queries a single-server PIR database directly by tag—retrieving its encrypted memo in constant online queries without revealing which tag it queried.
+
+Because single-server PIR scales as `O(√N)` per table, the protocol splits state into **four bounded databases**:
+
+```mermaid
+flowchart TB
+    subgraph Setup["1. Address Discovery (Off-chain PKI)"]
+        R1["Recipient mints addr = (pk, ek)"] -->|"PoW Write API"| Reg["Registry PIR: H(addr) => pk || ek"]
+        Reg -->|"Private PIR lookup"| S1["Sender fetches full (pk, ek)"]
+    end
+
+    subgraph Chain["2. On-Chain V7 Tachyon Transaction"]
+        S1 -->|"Creates note + TPM1 memo"| Tx["Zakura Node (NuTachyon)"]
+        Tx -->|"Proof stamps (tachygrams)"| TG["Tachygram PIR: tg => (height, ordinal)"]
+        Tx -->|"TPM1 0x02 (first-contact)"| FC["First-contact PIR: tag => KEM.c || ct"]
+        Tx -->|"TPM1 0x01 (follow-up)"| Memo["Memo PIR: tag => ct"]
+    end
+
+    subgraph Sync["3. Private Wallet Discovery & Spendability"]
+        FC -->|"Private lookup"| W["Recipient Wallet"]
+        Memo -->|"Private lookup"| W
+        TG -->|"Inclusion (cm) & Exclusion (nf)"| W
+    end
+```
+
+## Two-Host Deployment Topology
+
+```mermaid
+flowchart LR
+    node["Zakura Node"] -->|"JSON-RPC (getblock 2)"| pub["tachyon-pir-publisher"]
+    pub -->|"127.0.0.1:9400..9403"| edge["HTTPS TLS Edge"]
+    edge -->|"HTTPS Pull (/provider/*)"| qs["tachyon-pir-query-server"]
+    w_reg["Wallets (register)"] -->|"HTTPS POST /registry/v1"| edge
+    w_q["Wallets (queries)"] <-->|"HTTPS POST /<product>/v1/query"| qs
 ```
 
 1. **`tachyon-pir-publisher`**: Follows a [Zakura](https://github.com/zakura-core/zakura) node over JSON-RPC (`getblockchaininfo`, `getblockcount`, `getblockhash`, `getblock <hash> 2`), ingests Tachyon proof stamps and `vMemoTachyon` envelopes, accepts PoW-gated address registrations, deterministically builds `tachyon-4k8` bucket-row PIR tables, and serves them as content-addressed publications. It never contacts query servers.
@@ -18,10 +55,10 @@ Zakura node ──JSON-RPC──▶ tachyon-pir-publisher ──HTTPS pull──
 
 | Product | Mapping | Scope | Mount |
 | --- | --- | --- | --- |
-| **Memo** | `tag => ciphertext(128)` | One Tachyon epoch | `/memo/v1` |
-| **First-contact** | `tag => kem_ct(1088) \|\| ciphertext(128)` | Span of epochs (up to 3,072 entries or 64 epochs) | `/first-contact/v1` |
-| **Tachygram** | `tg(32) => blk_height(u32) \|\| stamp_ordinal(u32)` | One Tachyon epoch | `/tachygram/v1` |
-| **Registry** | `H(addr) => pk(32) \|\| ek(1184)` | Chunk of 3,072 registrations | `/registry/v1` |
+| **[Memo](/products/memo)** | `tag => ciphertext(128)` | One Tachyon epoch | `/memo/v1` |
+| **[First-contact](/products/first-contact)** | `tag => kem_ct(1088) \|\| ciphertext(128)` | Span of epochs (up to 3,072 entries or 64 epochs) | `/first-contact/v1` |
+| **[Tachygram](/products/tachygram)** | `tg(32) => blk_height(u32) \|\| stamp_ordinal(u32)` | One Tachyon epoch | `/tachygram/v1` |
+| **[Registry](/products/registry)** | `H(addr) => pk(32) \|\| ek(1184)` | Chunk of 3,072 registrations | `/registry/v1` |
 
 Every product also accepts the legacy alias `/v1/<product>`.
 

@@ -2,6 +2,32 @@
 
 This guide runs the full PIR stack — a local `NuTachyon` Zakura node, `tachyon-pir-publisher`, an HTTPS edge, `tachyon-pir-query-server`, and `tachyon-pir-cli` — on your machine.
 
+## What This Starts
+
+```mermaid
+flowchart TB
+    subgraph THS["thus-spoke-zakura (ths start --native)"]
+        zakurad["zakurad (NuTachyon Regtest RPC)"]
+        lwd["lightwalletd (V7 parser)"]
+        thssrv["ths-server (Dashboard & Faucet)"]
+        zakurad --> lwd --> thssrv
+    end
+
+    subgraph PIR["tachyon-payments"]
+        pub["tachyon-pir-publisher\n:9400 mgmt | :9401 memo+fc\n:9402 tachygram | :9403 registry"]
+        edge["Local HTTPS TLS Edge\nhttps://127.0.0.1:9443"]
+        qs["tachyon-pir-query-server\n:9500 mgmt | :9510 public PIR"]
+        pub --> edge -->|"HTTPS pull"| qs
+    end
+
+    cli["tachyon-pir-cli (Probe Client)"]
+
+    zakurad -->|"JSON-RPC (getblock 2)"| pub
+    cli -->|"Anchor check (JSON-RPC)"| zakurad
+    cli <-->|"Encrypted PIR queries"| qs
+    cli -.->|"Registry PoW writes"| edge
+```
+
 ## 1. Start a local `NuTachyon` regtest node
 
 Use the `tachyon-payments` branch of [`zcashlabs/thus-spoke-zakura`](https://github.com/zcashlabs/thus-spoke-zakura/tree/tachyon-payments) (`ths`), which runs a disposable `NuTachyon`-enabled Zakura node, `lightwalletd`, and a wallet-backed faucet/dashboard natively:

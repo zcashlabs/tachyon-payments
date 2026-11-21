@@ -18,10 +18,13 @@ Four products, each served as bucket-row PIR tables:
 
 One publisher process (`tachyon-pir-publisher`) follows a [Zakura](https://github.com/zakura-core/zakura) node, builds deterministic PIR tables, and publishes them as content-addressed objects; query hosts (`tachyon-pir-query-server`) pull those publications over HTTPS and answer encrypted row queries.
 
-```text
-Zakura node ──JSON-RPC──▶ tachyon-pir-publisher ──HTTPS pull──▶ tachyon-pir-query-server ◀── wallets
-                              ▲
-                              └── wallets (registry writes only)
+```mermaid
+flowchart LR
+    node["Zakura Node (NuTachyon)"] -->|"JSON-RPC"| pub["tachyon-pir-publisher"]
+    wallet_reg["Recipient Wallet"] -->|"PoW Write API (registry)"| edge
+    pub -->|"Private HTTP"| edge["HTTPS TLS Edge"]
+    edge -->|"HTTPS Pull (publications)"| qs["tachyon-pir-query-server"]
+    qs <-->|"Encrypted PIR Queries"| wallet_q["Sender & Recipient Wallets"]
 ```
 
 The wire and operational contract is the [implementation specification](docs/spec/spec-tachyon-payment-pir.md). The design mirrors [`valargroup/wallet-pir`](https://github.com/valargroup/wallet-pir) at revision `40b0ba6a` and reuses its shared libraries (`pir-publication`, `pir-pipeline`, `pir-sync-manager`, `pir-control`, `pir-node-rpc`, and others) as pinned git dependencies.

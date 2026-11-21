@@ -2,6 +2,23 @@
 
 The **first-contact** database lets a wallet privately discover initial payments from new senders (`tag => KEM.c || ciphertext`), carrying the ML-KEM-768 encapsulation ciphertext alongside the encrypted note opening.
 
+```mermaid
+sequenceDiagram
+    participant S as Sender Wallet
+    participant Z as Zakura Chain
+    participant P as Publisher
+    participant Q as Query Server
+    participant R as Recipient Wallet
+
+    S->>S: (KEM.c, ss) <- ML-KEM.Encaps(ek)
+    S->>Z: Broadcast V7 tx with TPM1 kind 0x02 (tag_fc || KEM.c || ct)
+    Z->>P: Block ingested into open span
+    P->>Q: Publish first-contact PIR table
+    R->>Q: Encrypted PIR query for row(tag_fc[0..16])
+    Q-->>R: Encrypted 8 KiB row
+    R->>R: ss <- ML-KEM.Decaps(dk, KEM.c), decrypt note & derive follow-up tags
+```
+
 | Property | Value |
 | --- | --- |
 | Scope | Contiguous span of epochs (`scope_id = first_epoch`), closing at 3,072 entries or 64 epochs |

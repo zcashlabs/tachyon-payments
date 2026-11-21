@@ -2,6 +2,14 @@
 
 The **tachygram** database lets a wallet privately verify two things per epoch: **inclusion** of a note commitment (returning the block height and stamp ordinal needed to fetch its creation stamp) and **exclusion** of a nullifier (proving a note remains unspent over the covered heights).
 
+```mermaid
+flowchart LR
+    W["Recipient Wallet"] -->|"PIR lookup: cm (32B)"| Q["Query Server (/tachygram/v1)"]
+    W -->|"PIR lookup: nf (32B)"| Q
+    Q -->|"Hit: (blk_height, stamp_ordinal)"| Inc["Fetch creation proof stamp from chain"]
+    Q -->|"Miss: canonical row without nf"| Exc["Note confirmed unspent over covered heights"]
+```
+
 | Property | Value |
 | --- | --- |
 | Scope | One Tachyon epoch (`scope_id = epoch`) |
