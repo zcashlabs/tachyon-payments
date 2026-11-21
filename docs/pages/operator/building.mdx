@@ -1,0 +1,52 @@
+# Building & Testing
+
+## Prerequisites
+
+- **Rust**: toolchain pinned in `rust-toolchain.toml` (`1.97.1`, with `rustfmt` and `clippy`)
+- **`git`**, **`make`**, and **Python 3.11+** (for CI boundary and test-budget scripts)
+- Network access to fetch the pinned `valargroup/wallet-pir` and `valargroup/ipir-sp` git dependencies (use `OFFLINE=1` once fetched)
+
+Verify your environment:
+
+```console
+make doctor
+```
+
+## Building the binaries
+
+Both host binaries select which products to compile via Cargo features. The default build enables **no** products, and a configuration section for a product not compiled in is rejected at startup.
+
+| Feature | Config section | Notes |
+| --- | --- | --- |
+| `memo` | `memo` | Epoched `tag => memo` database |
+| `first-contact` | `first_contact` | Implies `memo`; shares its listener and `state_dir` |
+| `tachygram` | `tachygram` | Epoched tachygram inclusion/exclusion database |
+| `registry` | `registry` | Off-chain address registry + PoW write API |
+
+### Deploy binaries (`release`, fat LTO)
+
+```console
+cargo build --locked --release -p tachyon-pir-publisher --features memo,first-contact,tachygram,registry
+cargo build --locked --release -p tachyon-pir-query-server --features memo,first-contact,tachygram,registry
+cargo build --locked --release -p tachyon-pir-cli
+```
+
+### Fast local iteration (`release-fast`, no LTO)
+
+```console
+cargo build --locked --profile release-fast -p tachyon-pir-publisher --features memo,first-contact,tachygram,registry
+cargo build --locked --profile release-fast -p tachyon-pir-query-server --features memo,first-contact,tachygram,registry
+cargo build --locked --profile release-fast -p tachyon-pir-cli
+```
+
+## Verification gates
+
+| Command | What it runs |
+| --- | --- |
+| `make check-package PACKAGE=<name> [TEST=<filter>]` | `fmt`, dependency boundary check, `clippy -D warnings`, and `release-fast` tests for one crate |
+| `make check-fast BASE=<commit>` | Same gates for crates changed since `BASE` and their dependents |
+| `make check-correctness` | Every workspace test and doctest under `release-fast`, timed per test (30 s) and total (300 s) |
+| `make check-full` | CI tool tests, `fmt`, boundary check, workspace `clippy -D warnings`, and workspace tests |
+| `make fmt` | `cargo fmt --all` |
+
+Fast tests run completely offline against synthetic chains and the node double in `tools/fixtures`. Slow full-geometry and live-testnet tests live behind `--features qualification-tests`.

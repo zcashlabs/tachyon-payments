@@ -1,0 +1,38 @@
+# Tachygram
+
+The **tachygram** database lets a wallet privately verify two things per epoch: **inclusion** of a note commitment (returning the block height and stamp ordinal needed to fetch its creation stamp) and **exclusion** of a nullifier (proving a note remains unspent over the covered heights).
+
+| Property | Value |
+| --- | --- |
+| Scope | One Tachyon epoch (`scope_id = epoch`) |
+| Source | `tachygrams[]` of every on-chain **proof** stamp; pointer stamps contribute nothing ([spec §8.2](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#82-scope-and-source)) |
+| Entry layout | `tg (32) \|\| blk_height (u32 LE) \|\| stamp_ordinal (u32 LE)` = **40 bytes** |
+| Slots per row | 204 (`floor(8192 / 40)`), target load 124 (~507,904 entries per `tachyon-4k8` table) |
+| Protocol string | `tachyon-tachygram-pir-v1` |
+| Query magic | `TGQ1` |
+| Mount | `/tachygram/v1` (legacy alias `/v1/tachygram`) |
+| Default retention | 64 epochs |
+
+## Placement & uniqueness
+
+Keys are full 32-byte tachygrams (not truncated):
+
+```text
+h      = SHA-256("tachyon-pir/tachygram/v1/place\0" || genesis_hash(32) || epoch(u64 LE) || seed(u32 LE) || tg(32))
+bucket = u32_le(h[4..8]) mod n_buckets
+row    = u32_le(h[0..4]) mod rows
+```
+
+Consensus requires tachygrams to be unique within a block and across the current and preceding epoch. Within a row, tachygrams are sorted in strictly ascending byte order. An all-zero or duplicate tachygram within an epoch is treated as an integrity fault ([spec §8.3](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#83-uniqueness)).
+
+## Lookup semantics
+
+- **Hit**: returns `(blk_height, stamp_ordinal)`, where `stamp_ordinal` is the zero-based index of the proof stamp among proof stamps in `blk_height`.
+- **Miss**: returns a canonical row that does not contain `tg`, proving absence across the epoch heights covered by the map's verified anchor ([spec §8.4](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#84-lookup-semantics)).
+
+Tachygram lookups are private hints; spendability is ultimately enforced by the wallet's proof and consensus.
+
+## Wire protocol & operations
+
+- Common table geometry, map format, and query framing: [Shared Table & Wire Protocol](/reference/shared) and [spec §8](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#8-product-tachygram).
+- Configuration and deployment: [Publisher Configuration](/operator/publisher) and [Query Server Configuration](/operator/query-server).

@@ -1,0 +1,117 @@
+# Query Server Configuration
+
+`tachyon-pir-query-server` pulls published PIR tables from the publisher over HTTPS, verifies digests and scope bindings, holds resident tables in memory, and answers encrypted wallet queries on a single `public_listen` address.
+
+## Command line
+
+```console
+tachyon-pir-query-server --config /etc/tachyon-pir/query.json --check
+tachyon-pir-query-server --config /etc/tachyon-pir/query.json
+```
+
+## Complete example
+
+```json
+{
+  "management_listen": "127.0.0.1:9500",
+  "public_listen": "127.0.0.1:9510",
+  "memo": {
+    "enabled": true,
+    "settings": {
+      "publisher": "https://publisher.example",
+      "publisher_ca": "/etc/tachyon-pir/publisher-ca.pem",
+      "state_dir": "/var/lib/tachyon-pir-query/memo",
+      "role": "combined",
+      "publisher_network": "test",
+      "publisher_genesis": "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+      "activation_height": 8,
+      "epoch_length": 4096,
+      "retain_scopes": 64,
+      "max_unconfirmed_seconds": 600,
+      "poll_ms": 1000,
+      "admission": {
+        "executing": 2,
+        "waiting": 8,
+        "wait_ms": 2000,
+        "per_client": 2,
+        "upload_ms": 15000
+      }
+    }
+  },
+  "first_contact": {
+    "enabled": true,
+    "settings": {
+      "publisher": "https://publisher.example",
+      "state_dir": "/var/lib/tachyon-pir-query/first-contact",
+      "role": "combined",
+      "publisher_network": "test",
+      "publisher_genesis": "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+      "activation_height": 8,
+      "epoch_length": 4096
+    }
+  },
+  "tachygram": {
+    "enabled": true,
+    "settings": {
+      "publisher": "https://publisher.example",
+      "state_dir": "/var/lib/tachyon-pir-query/tachygram",
+      "role": "combined",
+      "publisher_network": "test",
+      "publisher_genesis": "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+      "activation_height": 8,
+      "epoch_length": 4096
+    }
+  },
+  "registry": {
+    "enabled": true,
+    "settings": {
+      "publisher": "https://publisher.example",
+      "state_dir": "/var/lib/tachyon-pir-query/registry",
+      "role": "combined",
+      "publisher_network": "test",
+      "publisher_genesis": "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327"
+    }
+  }
+}
+```
+
+## Field reference
+
+### Top-level
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `management_listen` | Yes | Loopback `host:port` serving `/health`, `/ready`, and `/metrics` |
+| `public_listen` | Yes | Wallet-facing listener (put behind your public HTTPS edge) mounting `/<product>/v1` and `/v1/<product>` |
+| `memo`, `first_contact`, `tachygram`, `registry` | No | Each is `{ "enabled": bool, "settings": { ... } }` |
+
+### Product `settings`
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| `publisher` | Yes | — | Publisher HTTPS origin (`https://host[:port]`) |
+| `publisher_ca` | No | system roots | PEM CA certificate for verifying the publisher's TLS leaf certificate |
+| `state_dir` | Yes | — | Absolute, disjoint directory for local object cache, floor, and lock |
+| `role` | Yes | — | Must be `"combined"` in v1 |
+| `publisher_network` | Yes | — | Expected `network` string from the node (e.g. `"test"`, `"main"`) |
+| `publisher_genesis` | Yes | — | Expected genesis block hash in display order (64 hex chars) |
+| `activation_height` | Chain products only | — | `NuTachyon` activation height (omitted for `registry`) |
+| `epoch_length` | Chain products only | — | Blocks per epoch matching publisher config (omitted for `registry`) |
+| `retain_scopes` | No | product default | Number of newest scopes to keep resident (`64` for `memo`/`tachygram`) |
+| `max_unconfirmed_seconds` | No | `600` | Maximum time to keep serving after the last successful publisher authority check |
+| `poll_ms` | No | `1000` | Interval between successful sync passes in milliseconds |
+| `admission` | No | see below | Per-product concurrency and upload limits |
+
+### `admission`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `executing` | `2` | Maximum queries evaluated concurrently |
+| `waiting` | `8` | Maximum queries queued waiting for an evaluation slot |
+| `wait_ms` | `2000` | Maximum time a query waits for a slot before `503` |
+| `per_client` | `2` | Maximum concurrent in-flight queries per client |
+| `upload_ms` | `15000` | Maximum upload duration before `408` (body cap is fixed at 512 KiB) |
+
+## Memory sizing
+
+Each resident `tachyon-4k8` table costs roughly **160 MiB** of RAM (planning bound). Retaining 64 epochs at one table per epoch is ~10 GiB per chain product per query host; tune `retain_scopes` according to available memory and history window.

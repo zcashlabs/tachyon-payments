@@ -1,0 +1,15 @@
+{
+  "name": "tachyon-payments-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vocs dev",
+    "build": "vocs build",
+    "preview": "vocs preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vocs": "^1.4.1"
+  }
+}

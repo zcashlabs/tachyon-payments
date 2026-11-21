@@ -1,0 +1,27 @@
+# Observability & Alerts
+
+Both hosts expose operational endpoints on their loopback `management_listen` addresses and never log or label metrics with client-supplied bytes.
+
+## Endpoints
+
+| Host | Listener | Endpoints |
+| --- | --- | --- |
+| `tachyon-pir-publisher` | `management_listen` | `GET /health`, `GET /ready`, `GET /.well-known/pir-service-discovery` |
+| `tachyon-pir-publisher` | each product `listen` | `GET /metrics` (Prometheus text format) |
+| `tachyon-pir-query-server` | `management_listen` | `GET /health`, `GET /ready`, `GET /metrics` |
+
+`/ready` returns HTTP `200` with per-product `"phase": "running", "ready": true` once initial sync/publication has committed, and `503` while starting or degraded.
+
+## Publisher metrics
+
+- **Memo (`tachyon_memo_*`)**: `ingested_height`, `anchor_height`, `entries_total`, `open_scope_entries`, `segments_overflow_total`, `publication_seconds`, `sessions_revoked_total`, `envelopes_invalid_total`, `state_entries_total`.
+- **First-contact (`tachyon_first_contact_*`)**: `open_span_entries`, `open_span_epochs`, `segments_overflow_total`, `publication_seconds`, `sessions_revoked_total`.
+- **Tachygram (`tachyon_tachygram_*`)**: `ingested_height`, `anchor_height`, `entries_total`, `open_scope_entries`, `segments_overflow_total`, `publication_seconds`, `sessions_revoked_total`.
+- **Registry (`tachyon_registry_*`)**: `log_sequence`, `open_chunk_entries`, `registrations_total`, `registrations_duplicate_total`, `registrations_rejected_total`, `rate_limited_total`, `publication_seconds`, `sessions_revoked_total`.
+
+## Key alerts
+
+- **Ingestion stalled**: `ingested_height` falling behind the Zakura node tip, or ingestion halted by a duplicate/all-zero tachygram integrity fault.
+- **Segment overflow**: any publication failing because a bucket exceeded `MAX_SEGMENTS` (`8`). The previous publication continues serving while operators investigate.
+- **Query host staleness**: a query server failing to confirm publisher authority within `max_unconfirmed_seconds` (default `600` s) transitions out of ready.
+- **Registry write abuse**: spikes in `tachyon_registry_rate_limited_total` or `tachyon_registry_registrations_rejected_total`.

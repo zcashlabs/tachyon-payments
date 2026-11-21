@@ -1,0 +1,63 @@
+# TLS Edge & Routing
+
+Both `tachyon-pir-publisher` and `tachyon-pir-query-server` bind plaintext HTTP on loopback or private interfaces and expect a TLS-terminating reverse proxy (Caddy, Nginx, Envoy, or a cloud load balancer) in front of them.
+
+## Publisher edge routes
+
+`tachyon-pir-query-server` discovers each product via `/.well-known/pir-service-discovery` and pulls objects over HTTPS from a single publisher origin. Route prefixes to the publisher's listeners as follows:
+
+| Path prefix | Upstream listener | Purpose |
+| --- | --- | --- |
+| `/.well-known/pir-service-discovery` | `management_listen` (e.g. `127.0.0.1:9400`) | Service discovery |
+| `/provider/memo/` | `memo.settings.listen` (e.g. `127.0.0.1:9401`) | Memo publications |
+| `/provider/first-contact/` | `memo.settings.listen` (e.g. `127.0.0.1:9401`) | First-contact publications |
+| `/provider/tachygram/` | `tachygram.settings.listen` (e.g. `127.0.0.1:9402`) | Tachygram publications |
+| `/provider/registry/` | `registry.settings.listen` (e.g. `127.0.0.1:9403`) | Registry publications |
+| `/registry/v1/` and `/v1/registry/` | `registry.settings.listen` (e.g. `127.0.0.1:9403`) | Public registry write API (`GET challenge`, `POST register`) |
+
+Keep `/health`, `/ready`, and `/metrics` private — do not expose them on the public edge.
+
+For the registry write API, forward the client's IP in `X-Forwarded-For` so per-client rate limits apply per caller rather than globally to the proxy.
+
+### Example Caddyfile (publisher edge)
+
+```caddyfile
+publisher.example {
+    handle /.well-known/pir-service-discovery {
+        reverse_proxy 127.0.0.1:9400
+    }
+    handle /provider/memo/* {
+        reverse_proxy 127.0.0.1:9401
+    }
+    handle /provider/first-contact/* {
+        reverse_proxy 127.0.0.1:9401
+    }
+    handle /provider/tachygram/* {
+        reverse_proxy 127.0.0.1:9402
+    }
+    handle /provider/registry/* {
+        reverse_proxy 127.0.0.1:9403
+    }
+    handle /registry/v1/* {
+        reverse_proxy 127.0.0.1:9403
+    }
+    handle /v1/registry/* {
+        reverse_proxy 127.0.0.1:9403
+    }
+}
+```
+
+## Query-server edge
+
+Terminate public HTTPS in front of `tachyon-pir-query-server`'s `public_listen` (e.g. `127.0.0.1:9510`). All enabled products are mounted on that single listener at:
+
+- `/memo/v1/*` (alias `/v1/memo/*`)
+- `/first-contact/v1/*` (alias `/v1/first-contact/*`)
+- `/tachygram/v1/*` (alias `/v1/tachygram/*`)
+- `/registry/v1/*` (alias `/v1/registry/*`)
+
+Ensure the proxy allows request bodies up to at least **512 KiB** (the PIR query body limit).
+
+## Certificate note for private CAs
+
+`tachyon-pir-query-server` uses `rustls`, which rejects a CA certificate (`CA:TRUE`) presented directly as the server leaf certificate (`CaUsedAsEndEntity`). When using a private CA (`publisher_ca`), always sign a separate leaf certificate (`basicConstraints=CA:FALSE`, `extendedKeyUsage=serverAuth`, matching SAN) with your CA.

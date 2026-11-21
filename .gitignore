@@ -1,4 +1,7 @@
 **/target/
 /.local-pir
+/docs/node_modules
+/docs/dist
+/docs/.vocs
 .DS_Store
 __pycache__/

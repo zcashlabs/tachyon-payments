@@ -1,0 +1,20 @@
+---
+layout: landing
+---
+
+import { HomePage } from 'vocs/components'
+
+<HomePage.Root>
+  <img src="/banner.png" alt="tachyon-payments by Zcash Labs" style={{ width: '100%', borderRadius: '8px', marginBottom: '1.5rem' }} />
+  <HomePage.Tagline>
+    Private-retrieval (PIR) services for the Tachyon payment protocol on Zcash, built by Zcash Labs.
+  </HomePage.Tagline>
+  <HomePage.Description>
+    Four single-server PIR databases — memo, first-contact, tachygram, and address registry — backed by a deterministic publisher and stateless query hosts.
+  </HomePage.Description>
+  <HomePage.Buttons>
+    <HomePage.Button href="/quickstart" variant="accent">Local Quickstart</HomePage.Button>
+    <HomePage.Button href="/operator/building">Operator Guide</HomePage.Button>
+    <HomePage.Button href="/architecture">Architecture</HomePage.Button>
+  </HomePage.Buttons>
+</HomePage.Root>

@@ -1,0 +1,63 @@
+# Probe Client (CLI)
+
+`tachyon-pir-cli` is a diagnostic probe client for inspecting maps and executing real encrypted PIR lookups against a query host. It prints one JSON document to stdout and exits `0` on success or `1` on error (also formatted as JSON).
+
+## Global options
+
+```console
+tachyon-pir-cli --origin <URL> --product <PRODUCT> [OPTIONS] <COMMAND>
+```
+
+| Flag | Description |
+| --- | --- |
+| `--origin <URL>` | Query host origin, e.g. `https://pir.example` or `http://127.0.0.1:9510` |
+| `--product <PRODUCT>` | One of `memo`, `first-contact`, `tachygram`, `registry` |
+| `--ca <PEM>` | Custom PEM CA certificate to trust instead of system roots |
+| `--node <RPC_URL>` | Zakura JSON-RPC URL; verifies the map's `genesis_hash` and `anchor_hash` against the node before querying (chain products only) |
+| `--legacy-mount` | Use `/v1/<product>` instead of `/<product>/v1` |
+
+## Commands
+
+### `map`
+
+Fetch, validate, and summarize the product's map and scopes:
+
+```console
+tachyon-pir-cli \
+  --origin http://127.0.0.1:9510 \
+  --product tachygram \
+  --node http://127.0.0.1:40445 \
+  map
+```
+
+### `lookup`
+
+Execute an encrypted PIR lookup for a key in a specific scope (`--scope <INDEX>` or `--scope-id <ID>`):
+
+```console
+# Memo (32-byte tag or 16-byte key16 hex)
+tachyon-pir-cli --origin http://127.0.0.1:9510 --product memo --node http://127.0.0.1:40445 \
+  lookup --scope 1 --key <64-hex-tag>
+
+# First-contact (span index 0)
+tachyon-pir-cli --origin http://127.0.0.1:9510 --product first-contact --node http://127.0.0.1:40445 \
+  lookup --scope 0 --key <64-hex-tag>
+
+# Tachygram (32-byte tachygram hex)
+tachyon-pir-cli --origin http://127.0.0.1:9510 --product tachygram --node http://127.0.0.1:40445 \
+  lookup --scope 1 --key <64-hex-tachygram>
+
+# Registry (32-byte address digest hex, chunk 0)
+tachyon-pir-cli --origin http://127.0.0.1:9510 --product registry \
+  lookup --scope 0 --key <64-hex-digest>
+```
+
+A successful lookup returns `"result": "found"` with the decoded `entries` (plus `answer.queries` metadata), or `"result": "absent"` when the canonical row proves the key is not present in the scope.
+
+### `dummy`
+
+Send a dummy PIR query to a scope, wire-indistinguishable from a real lookup:
+
+```console
+tachyon-pir-cli --origin http://127.0.0.1:9510 --product memo dummy --scope 0
+```

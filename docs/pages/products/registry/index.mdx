@@ -1,0 +1,58 @@
+# Registry
+
+The **registry** is an off-chain address directory (`H(addr) => pk || ek`) that lets a sender expand a recipient's short address `(chunk_id, digest)` into a full Tachyon payment address privately over PIR.
+
+| Property | Value |
+| --- | --- |
+| Scope | Append-only chunk of `3,072` registrations (`scope_id = chunk_id`, from `0`) |
+| Source | Public PoW-gated write API on the publisher ([spec §9.3](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#93-write-api)) |
+| Entry layout | `key16 (16) \|\| pk (32) \|\| ek (1184)` = **1,232 bytes** |
+| Slots per row | 6 (`floor(8192 / 1232)`), target load 1 (~4,096 entries per `tachyon-4k8` table) |
+| Protocol string | `tachyon-registry-pir-v1` |
+| Query magic | `TRQ1` |
+| Mount | `/registry/v1` (legacy alias `/v1/registry`) |
+| Default retention | All chunks |
+
+## Address & digest
+
+```text
+addr   = pk(32) || ek(1184)                     // 1,216 bytes (ML-KEM-768, provisional)
+digest = SHA-256("tachyon-pir/registry/v1/addr\0" || addr)
+key16  = digest[0..16]
+```
+
+After decoding a PIR row, the sender finds the entry matching `key16` and accepts it only if `SHA-256("tachyon-pir/registry/v1/addr\0" || pk || ek) == digest` ([spec §9.1](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#91-address-and-digest)).
+
+## Placement
+
+`n_buckets` is always `1` for registry chunks:
+
+```text
+h   = SHA-256("tachyon-pir/registry/v1/place\0" || genesis_hash(32) || chunk_id(u64 LE) || seed(u32 LE) || key16(16))
+row = u32_le(h[0..4]) mod rows
+```
+
+Once a chunk reaches `3,072` entries it seals immediately (there are no chain reorgs). Entries are append-only and never modified or deleted.
+
+## Write API
+
+Served on the registry publisher listener (routed through your HTTPS edge at `/registry/v1`):
+
+1. **`GET /registry/v1/challenge`** — returns a stateless HMAC-signed challenge:
+   ```json
+   { "challenge": "<64 hex>", "difficulty_bits": 20, "expires_unix": 1794670000 }
+   ```
+2. **`POST /registry/v1/register`** — raw 1,256-byte body `challenge(32) || nonce(8 LE) || addr(1216)`:
+   - Proof of work: `SHA-256("tachyon-pir/registry/v1/pow\0" || challenge || nonce || digest)` must have at least `difficulty_bits` leading zero bits.
+   - Validates `pk` (canonical Pasta field element), `ek` (ML-KEM-768 encapsulation-key modulus check), and non-zero `key16`.
+   - Returns HTTP `200` only after fsync:
+     ```json
+     { "chunk_id": 0, "digest": "<64 hex>", "created": true, "visible_after_sequence": 42 }
+     ```
+   - Idempotent: re-registering an existing address returns its existing `chunk_id` with `"created": false`.
+
+## Wire protocol & operations
+
+- Registry maps carry `log_sequence` instead of `activation_height`, `epoch_length`, `anchor_height`, and `anchor_hash`.
+- Common table geometry and query framing: [Shared Table & Wire Protocol](/reference/shared) and [spec §9](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md#9-product-registry).
+- Configuration and rate-limit settings: [Publisher Configuration](/operator/publisher) and [Query Server Configuration](/operator/query-server).

@@ -1,0 +1,91 @@
+# Publisher Configuration
+
+`tachyon-pir-publisher` is a single process that follows one Zakura node, builds deterministic PIR tables for every enabled product, and serves content-addressed publications on per-product private listeners.
+
+## Command line
+
+```console
+tachyon-pir-publisher --config /etc/tachyon-pir/publisher.json --check
+tachyon-pir-publisher --config /etc/tachyon-pir/publisher.json
+tachyon-pir-publisher --contract-info
+```
+
+- `--config <FILE>`: path to the JSON configuration file. Unknown fields are refused.
+- `--check`: validates the configuration offline (opens no sockets, stores, or RPC connections) and exits `0` on success.
+- `--contract-info`: prints the service-discovery contract and compiled products as JSON.
+
+## Complete example
+
+```json
+{
+  "management_listen": "127.0.0.1:9400",
+  "chain": {
+    "rpc_url": "http://127.0.0.1:18232",
+    "rpc_cookie": "/var/lib/zakura/.cookie",
+    "poll_ms": 1000,
+    "epoch_length": 4096
+  },
+  "memo": {
+    "enabled": true,
+    "settings": {
+      "listen": "127.0.0.1:9401",
+      "state_dir": "/var/lib/tachyon-pir/memo"
+    }
+  },
+  "first_contact": {
+    "enabled": true,
+    "settings": {}
+  },
+  "tachygram": {
+    "enabled": true,
+    "settings": {
+      "listen": "127.0.0.1:9402",
+      "state_dir": "/var/lib/tachyon-pir/tachygram"
+    }
+  },
+  "registry": {
+    "enabled": true,
+    "settings": {
+      "listen": "127.0.0.1:9403",
+      "state_dir": "/var/lib/tachyon-pir/registry",
+      "difficulty_bits": 20,
+      "per_client_concurrent": 2,
+      "per_client_per_minute": 6,
+      "global_per_minute": 600,
+      "upload_ms": 15000,
+      "publish_ms": 1000
+    }
+  }
+}
+```
+
+## Field reference
+
+### Top-level
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `management_listen` | Yes | Loopback `host:port` serving `/health`, `/ready`, and `/.well-known/pir-service-discovery` |
+| `chain` | When any product is enabled | Node RPC settings and `epoch_length` |
+| `memo`, `first_contact`, `tachygram`, `registry` | No | Each is `{ "enabled": bool, "settings": { ... } }` |
+
+### `chain`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `rpc_url` | — | `http://` or `https://` Zakura JSON-RPC endpoint without embedded credentials |
+| `rpc_cookie` | — | Absolute path to Zakura cookie file (mutually exclusive with `no_auth: true`) |
+| `no_auth` | `false` | Explicitly allow unauthenticated RPC (mutually exclusive with `rpc_cookie`) |
+| `poll_ms` | `1000` | Chain tip poll interval in milliseconds (nonzero) |
+| `epoch_length` | — | Blocks per Tachyon epoch (`>= 2`; `4096` on alpha testnet). Bound into every chain journal and distribution scope |
+
+The publisher uses only `getblockchaininfo`, `getblockcount`, `getblockhash`, and `getblock <hash> 2`. It refuses to start if `NuTachyon` is absent from `getblockchaininfo.upgrades`.
+
+### Product sections
+
+- **`memo.settings`**: `listen` (private `host:port` serving `/provider/memo/v1/`, `/provider/first-contact/v1/`, and `/metrics`) and absolute `state_dir`.
+- **`first_contact.settings`**: must be `{}`. Requires `memo` to be enabled; shares its listener and `state_dir`.
+- **`tachygram.settings`**: `listen` (private `host:port` serving `/provider/tachygram/v1/` and `/metrics`) and absolute `state_dir`.
+- **`registry.settings`**: `listen` (serves `/provider/registry/v1/`, `/registry/v1/`, `/v1/registry/`, and `/metrics`), absolute `state_dir`, plus optional abuse/cadence limits: `difficulty_bits` (default `20`), `per_client_concurrent` (`2`), `per_client_per_minute` (`6`), `global_per_minute` (`600`), `upload_ms` (`15000`), `publish_ms` (`1000`).
+
+All product `listen` addresses must be private/loopback with distinct fixed ports, and all `state_dir` paths must be absolute and disjoint.

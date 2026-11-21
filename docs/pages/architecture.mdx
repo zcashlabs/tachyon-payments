@@ -1,0 +1,39 @@
+# Architecture
+
+`tachyon-payments` implements the server-side Private Information Retrieval (PIR) layer of the Tachyon payment protocol on Zcash. A wallet uses these services to fetch encrypted memos, first-contact handshakes, tachygrams, and recipient addresses without revealing to the server which entry it wants.
+
+## Two-Host Topology
+
+```text
+Zakura node ──JSON-RPC──▶ tachyon-pir-publisher ──HTTPS pull──▶ tachyon-pir-query-server ◀── wallets
+                              ▲
+                              └── wallets (registry writes only)
+```
+
+1. **`tachyon-pir-publisher`**: Follows a [Zakura](https://github.com/zakura-core/zakura) node over JSON-RPC (`getblockchaininfo`, `getblockcount`, `getblockhash`, `getblock <hash> 2`), ingests Tachyon proof stamps and `vMemoTachyon` envelopes, accepts PoW-gated address registrations, deterministically builds `tachyon-4k8` bucket-row PIR tables, and serves them as content-addressed publications. It never contacts query servers.
+2. **HTTPS TLS Edge**: Terminates TLS in front of the publisher's private listeners, routing service discovery (`/.well-known/pir-service-discovery`), publication pull endpoints (`/provider/<product>/v1/*`), and the public registry write API (`/registry/v1/*`).
+3. **`tachyon-pir-query-server`**: Pulls publications from the publisher over HTTPS, verifies digests, network identity, and scope bindings, holds resident PIR tables in memory, and answers encrypted row queries from wallets on a single public listener.
+
+## The Four Products
+
+| Product | Mapping | Scope | Mount |
+| --- | --- | --- | --- |
+| **Memo** | `tag => ciphertext(128)` | One Tachyon epoch | `/memo/v1` |
+| **First-contact** | `tag => kem_ct(1088) \|\| ciphertext(128)` | Span of epochs (up to 3,072 entries or 64 epochs) | `/first-contact/v1` |
+| **Tachygram** | `tg(32) => blk_height(u32) \|\| stamp_ordinal(u32)` | One Tachyon epoch | `/tachygram/v1` |
+| **Registry** | `H(addr) => pk(32) \|\| ek(1184)` | Chunk of 3,072 registrations | `/registry/v1` |
+
+Every product also accepts the legacy alias `/v1/<product>`.
+
+## Dependency Boundaries & Determinism
+
+CI (`tools/ci/boundary.py`) enforces two strict architectural invariants across the Cargo workspace:
+
+- **Serving code never depends on chain or ingestion code.** `tachyon-pir-protocol`, `tachyon-pir-table`, and `tachyon-pir-query-server` cannot reach `tachyon-chain`, any product store/publisher, or `pir-node-rpc`.
+- **Product families never depend on each other.** The memo (including first-contact), tachygram, and registry crates are isolated from one another.
+
+Sealed tables are a pure function of the chain (or registration log) and the protocol constants: rebuilding from scratch or across restarts produces byte-identical tables and digests.
+
+## Specification
+
+The normative contract for wire formats, table geometry, placement hashing, and operational rules is [`docs/spec/spec-tachyon-payment-pir.md`](https://github.com/zcashlabs/tachyon-payments/blob/master/docs/spec/spec-tachyon-payment-pir.md).
