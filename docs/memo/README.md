@@ -1,6 +1,6 @@
 # Memo
 
-Status: specified, not implemented (milestone M2). Nothing is deployed.
+Status: implemented; not yet qualified or deployed.
 
 The memo database answers `tag => memo` for follow-up payments. A sender who
 already shares a channel with a recipient puts a 32-byte tag and a 128-byte

@@ -16,7 +16,7 @@ Passing the automated checks is not a qualification certificate.
 
 ## Acceptance scenarios (spec 13.2)
 
-Scenarios 1 to 13 (the M2 exit criterion, with memo). Scenario 5 (duplicate
+Scenarios 1 to 13 (with memo). Scenario 5 (duplicate
 keys) and 6 (forced overflow) matter most here: anyone can publish at a
 first-contact tag, and a row holds only six entries.
 

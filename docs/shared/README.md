@@ -1,6 +1,6 @@
 # Shared libraries and the common design
 
-Status: specified, not implemented, except where noted. The contract is the
+The contract is the
 [spec](../spec/spec-tachyon-payment-pir.md); section numbers below refer to it.
 
 All four products use one table design, one wire protocol shape and one

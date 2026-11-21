@@ -1,7 +1,7 @@
 # Memo deployment
 
 Status: not deployed. This page states the configuration the spec defines
-(section 11.7); no binary implements it yet.
+(section 11.7).
 
 ## Publisher
 

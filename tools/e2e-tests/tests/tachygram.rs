@@ -1,5 +1,4 @@
-//! Tachygram end-to-end acceptance (spec 13.2 scenarios 1-4, 6 and 8-13; the
-//! milestone M1 exit criterion of spec 14 without scenario 15, the live run).
+//! Tachygram end-to-end acceptance (spec 13.2 scenarios 1-4, 6 and 8-13).
 //!
 //! Every test runs the topology of spec 13.1: the in-process node double
 //! serving an authored chain (16-block epochs), the publisher binary, the TLS

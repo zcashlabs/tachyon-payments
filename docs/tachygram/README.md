@@ -1,6 +1,6 @@
 # Tachygram
 
-Status: specified, not implemented (milestone M1). Nothing is deployed.
+Status: implemented; not yet qualified or deployed.
 
 The tachygram database lets a wallet do two things privately, per epoch:
 locate its note commitment (inclusion) and check that a per-epoch nullifier is
@@ -21,8 +21,8 @@ wallet needs to fetch the creation stamp.
 | Crates | `tachygram-store`, `tachygram-publisher` (`src/tachygram/`); serving module in `tachyon-pir-query-server`, feature `tachygram` |
 | Default retention | 64 epochs |
 
-Tachygram comes first (M1) because it is the only product with real data on
-the testnet: about 190,000 tachygrams per epoch at the observed rate.
+Tachygram is the only product with real data on the alpha testnet: about
+190,000 tachygrams per epoch at the observed rate.
 Tachygram results are hints; spendability is finally established by the
 wallet's proof and consensus.
 

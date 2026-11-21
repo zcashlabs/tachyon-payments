@@ -369,8 +369,8 @@ hand-authored invalid envelopes with valid companions (skipped and counted,
 ingestion continues), shallow reorg (for first-contact one that removes an
 unsealed span boundary), reorg into a sealed scope (`410`), corrupt and
 truncated objects, publisher outage, restart of each process, and overload.
-`tests/registry.rs` holds scenarios 1-4, 6 and 10-14 for the registry
-(milestone M3): no consumers (the empty log, then each batch published with
+`tests/registry.rs` holds scenarios 1-4, 6 and 10-14 for the registry:
+no consumers (the empty log, then each batch published with
 the listing checked), cold bootstrap with exact answers (one registration
 through the edge), a sealed chunk of 3,072 registrations with the empty open
 chunk answering absent without a query, then incremental publication across

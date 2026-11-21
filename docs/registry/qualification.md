@@ -17,7 +17,7 @@ Passing the automated checks is not a qualification certificate.
 
 ## Acceptance scenarios (spec 13.2)
 
-The M3 exit criterion is scenarios 1 to 4, 6, and 10 to 14. Scenario 14 is the
+The acceptance suite covers scenarios 1 to 4, 6, and 10 to 14. Scenario 14 is the
 registry's own: writes are idempotent, durable before acknowledgement, visible at
 the promised sequence, and proof of work and rate limits are enforced.
 Spec 14 does not list scenarios 5, 7, 8, 9 and 15 for the registry; it has no

@@ -4,7 +4,7 @@ This workspace builds the server side of the Tachyon payment protocol's private
 retrieval layer: four PIR products (memo, first-contact, tachygram, registry),
 one publisher binary and one query-server binary. The contract is
 [`docs/spec/spec-tachyon-payment-pir.md`](docs/spec/spec-tachyon-payment-pir.md)
-("the spec"). It mirrors `../wallet-pir` at revision `40b0ba6a` and reuses its
+("the spec"). It mirrors `valargroup/wallet-pir` at revision `40b0ba6a` and reuses its
 shared libraries as pinned git dependencies.
 
 ## The spec is the contract

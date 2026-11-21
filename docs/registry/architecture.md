@@ -1,6 +1,6 @@
 # Registry architecture
 
-Status: specified, not implemented.
+Status: implemented.
 
 ```
 wallets ──POST /registry/v1/register──▶ tachyon-pir-publisher (registry-publisher)

@@ -1,6 +1,6 @@
 # Memo architecture
 
-Status: specified, not implemented.
+Status: implemented.
 
 ```
 Zakura node ─▶ tachyon-chain ─▶ memo-publisher (ingestion) ─▶ memo-store (memo-v1.sqlite)

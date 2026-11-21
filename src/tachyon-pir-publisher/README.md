@@ -9,12 +9,12 @@ servers.
 
 Products are Cargo features; the default build hosts none.
 
-| Feature | Section | Product library | Status |
-|---|---|---|---|
-| `tachygram` | `tachygram` | `tachygram-publisher` | M1 |
-| `memo` | `memo` | `memo-publisher` | M2 |
-| `first-contact` (implies `memo`) | `first_contact` | `memo-publisher` | M2 |
-| `registry` | `registry` | `registry-publisher` | M3 |
+| Feature | Section | Product library |
+|---|---|---|
+| `tachygram` | `tachygram` | `tachygram-publisher` |
+| `memo` | `memo` | `memo-publisher` |
+| `first-contact` (implies `memo`) | `first_contact` | `memo-publisher` |
+| `registry` | `registry` | `registry-publisher` |
 
 ```
 cargo build --release -p tachyon-pir-publisher --features memo,first-contact,tachygram,registry

@@ -1,67 +1,57 @@
-# Tachyon payment PIR
+![tachyon-payments by Zcash Labs](./banner.png)
 
-Private-retrieval services for the Tachyon payment protocol on Zcash. A wallet
-uses them to fetch the data it needs to receive payments without telling the
-server which entry it wants. Four products, each a set of PIR tables:
+# tachyon-payments [![X][x-badge]][x]
 
-- **[Memo](docs/memo/README.md)**: the epoched memo database, `tag => memo`.
-- **[First-contact](docs/first-contact/README.md)**: the first-contact memo
-  database, `tag => KEM.c || memo`, over spans of epochs.
-- **[Tachygram](docs/tachygram/README.md)**: the epoched tachygram database a
-  wallet uses to locate its note commitment and to check that a nullifier is
-  absent.
-- **[Registry](docs/registry/README.md)**: the off-chain address registry,
-  `H(addr) => addr`, with a rate-limited write API.
+[x]: https://x.com/zcashlabs
+[x-badge]: https://img.shields.io/twitter/follow/zcashlabs
 
-One publisher process follows the Tachyon testnet node, builds the tables and
-publishes them as content-addressed objects; query servers pull those
-publications and answer encrypted row queries.
+Private-retrieval (PIR) services for the Tachyon payment protocol on [Zcash](https://z.cash), built by [Zcash Labs](https://zcashlabs.com). A wallet uses them to fetch the data it needs to receive payments without revealing to the server which entry it is querying.
 
-```
+Four products, each served as bucket-row PIR tables:
+
+- **[Memo](docs/memo/README.md)**: epoched memo database, `tag => memo`.
+- **[First-contact](docs/first-contact/README.md)**: first-contact memo database, `tag => KEM.c || memo`, over spans of epochs.
+- **[Tachygram](docs/tachygram/README.md)**: epoched tachygram database used to verify note commitment inclusion and nullifier absence.
+- **[Registry](docs/registry/README.md)**: off-chain address registry, `H(addr) => addr`, with a PoW-gated, rate-limited write API.
+
+One publisher process (`tachyon-pir-publisher`) follows a [Zakura](https://github.com/zakura-core/zakura) node, builds deterministic PIR tables, and publishes them as content-addressed objects; query hosts (`tachyon-pir-query-server`) pull those publications over HTTPS and answer encrypted row queries.
+
+```text
 Zakura node ──JSON-RPC──▶ tachyon-pir-publisher ──HTTPS pull──▶ tachyon-pir-query-server ◀── wallets
                               ▲
                               └── wallets (registry writes only)
 ```
 
-**Status:** draft specification; implementation started at milestone M0 (workspace,
-CI gates, chain decoder, node double). Nothing is deployed or qualified.
-
-The contract is the [implementation specification](docs/spec/spec-tachyon-payment-pir.md).
-The design mirrors [`wallet-pir`](https://github.com/valargroup/wallet-pir) at
-revision `40b0ba6a` and reuses its shared libraries (`pir-publication`,
-`pir-pipeline`, `pir-sync-manager`, `pir-control`, `pir-node-rpc` and others) as
-pinned git dependencies.
+The wire and operational contract is the [implementation specification](docs/spec/spec-tachyon-payment-pir.md). The design mirrors [`valargroup/wallet-pir`](https://github.com/valargroup/wallet-pir) at revision `40b0ba6a` and reuses its shared libraries (`pir-publication`, `pir-pipeline`, `pir-sync-manager`, `pir-control`, `pir-node-rpc`, and others) as pinned git dependencies.
 
 ## Layout
 
 | Directory | Contents |
-|---|---|
-| `src/shared/` | `tachyon-chain` (node reads), `tachyon-pir-protocol` (wallet-facing contract), `tachyon-pir-table` (the shared bucket-row table) |
-| `src/memo/`, `src/tachygram/`, `src/registry/` | Each product's store and publisher crates; first-contact uses the memo crates |
-| `src/tachyon-pir-publisher`, `src/tachyon-pir-query-server` | The two binaries |
+| --- | --- |
+| `src/shared/` | `tachyon-chain` (node reads), `tachyon-pir-protocol` (wallet-facing contract), `tachyon-pir-table` (bucket-row PIR table), `tachyon-pir-distribution` (publication sync) |
+| `src/memo/`, `src/tachygram/`, `src/registry/` | Each product's store and publisher crates; first-contact shares the memo crates |
+| `src/tachyon-pir-publisher`, `src/tachyon-pir-query-server` | Publisher and query-server binaries |
 | `tools/` | Probe client (`tools/client`), end-to-end tests (`tools/e2e-tests`), node double and fixtures (`tools/fixtures`), CI gates (`tools/ci`) |
 | `docs/` | [Documentation index](docs/README.md), the spec, per-product docs |
-| `evidence/` | [Qualification and measurement records](evidence/README.md) |
 
 ## Build and test
 
-Prerequisites: rustup with the toolchain pinned in `rust-toolchain.toml`
-(1.97.1, with rustfmt and clippy), git, make and Python 3.11 or newer. The git
-dependencies on `valargroup/wallet-pir` and `valargroup/ipir-sp` must be
-fetchable.
+Prerequisites: `rustup` with the toolchain pinned in `rust-toolchain.toml` (1.97.1, with `rustfmt` and `clippy`), `git`, `make`, and Python 3.11+.
 
-```sh
-make doctor                       # prerequisites; NETWORK=1 also probes the testnet RPC
+```console
+make doctor                       # verify toolchain and prerequisites
 make check-package PACKAGE=tachyon-chain
-make check-fast BASE=origin/main  # affected packages since BASE
-make check-correctness            # all tests, each under 30 s, the run under 5 min
-make check-full                   # fmt, boundary, workspace clippy and tests
+make check-fast BASE=origin/master
+make check-correctness            # all workspace tests under release-fast
+make check-full                   # fmt, boundary check, clippy, and tests
 ```
 
-Tests use the `release-fast` profile (`cargo test --profile release-fast`).
-Deploy binaries use `release` (fat LTO): `cargo build --release -p
-tachyon-pir-publisher --features memo,first-contact,tachygram,registry`, once
-the hosts exist.
+Build the host binaries with all four products enabled:
 
-See [AGENTS.md](AGENTS.md) for the development rules: the spec is the contract,
-dependency boundaries, test budgets and how the gates work.
+```console
+cargo build --release -p tachyon-pir-publisher --features memo,first-contact,tachygram,registry
+cargo build --release -p tachyon-pir-query-server --features memo,first-contact,tachygram,registry
+cargo build --release -p tachyon-pir-cli
+```
+
+See [AGENTS.md](AGENTS.md) for development rules, dependency boundaries, and test budgets.

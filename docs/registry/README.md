@@ -1,6 +1,6 @@
 # Registry
 
-Status: specified, not implemented (milestone M3). Nothing is deployed.
+Status: implemented; not yet qualified or deployed.
 
 The registry is the off-chain address registry (PKI): `H(addr) => addr`. A
 recipient registers its full address once and shares a short address,

@@ -23,7 +23,6 @@ Memo must pass scenarios 1 to 13: publisher with no consumers, cold bootstrap
 over TLS, incremental publication, exact answers, duplicate keys, forced
 overflow, invalid envelopes, shallow reorg, reorg into a sealed scope, corrupt
 or truncated object, publisher outage, restart of each process, and overload.
-This is the M2 exit criterion.
 
 There is no memo traffic on the testnet, so the oracle runs on synthetic chains
 from `tools/fixtures` until wallets publish envelopes.

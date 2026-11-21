@@ -1,6 +1,6 @@
 # First-contact
 
-Status: specified, not implemented (milestone M2). Nothing is deployed.
+Status: implemented; not yet qualified or deployed.
 
 The first-contact database answers `tag => KEM.c || memo` for the first payment
 to an address. A sender with no prior channel encapsulates to the recipient's

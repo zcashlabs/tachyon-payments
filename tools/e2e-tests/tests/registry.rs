@@ -1,5 +1,4 @@
-//! Registry end-to-end acceptance (spec 13.2 scenarios 1-4, 6 and 10-14: the
-//! milestone M3 exit criterion of spec 14).
+//! Registry end-to-end acceptance (spec 13.2 scenarios 1-4, 6 and 10-14).
 //!
 //! Every test runs the registry topology of spec 13.1
 //! ([`RegistryTopology`]): the publisher binary with the registry enabled

@@ -13,8 +13,8 @@ autobins = false
 path = "src/lib.rs"
 
 # Product end-to-end tests. Every product feature is on by default so that
-# `cargo test --workspace` runs the acceptance scenarios (spec 13.2; 14 M1 for
-# tachygram, M2 for memo and first-contact, M3 for registry). The re-declared
+# `cargo test --workspace` runs the acceptance scenarios (spec 13.2) for
+# tachygram, memo, first-contact and registry. The re-declared
 # host entrypoints below resolve their `#[cfg(feature = ..)]` against this
 # package's features, so each product feature also enables the product in both
 # host libraries. First-contact runs inside the memo publisher (spec 11.7), so

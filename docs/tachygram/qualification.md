@@ -18,7 +18,7 @@ Passing the automated checks is not a qualification certificate.
 
 ## Acceptance scenarios (spec 13.2)
 
-The M1 exit criterion is scenarios 1 to 4, 6 and 8 to 13 for tachygram, plus
+The acceptance suite covers scenarios 1 to 4, 6 and 8 to 13 for tachygram, plus
 scenario 15: the tachygram product follows the alpha testnet for 24 hours with
 exact answers. Scenarios 5 (duplicate keys) and 7 (invalid envelopes) do not
 apply: tachygrams are unique per epoch and do not come from envelopes.

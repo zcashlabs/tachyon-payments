@@ -1,5 +1,4 @@
-//! First-contact end-to-end acceptance (spec 13.2 scenarios 1-13; with
-//! `tests/memo.rs`, the milestone M2 exit criterion of spec 14).
+//! First-contact end-to-end acceptance (spec 13.2 scenarios 1-13).
 //!
 //! Every test runs the topology of spec 13.1: the in-process node double
 //! serving an authored chain, one publisher process with memo and

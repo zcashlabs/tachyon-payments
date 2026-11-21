@@ -1,12 +1,9 @@
 # Tachyon payment-protocol PIR services: implementation specification
 
-Status: draft for review, 2026-11-14. Nothing in this document is implemented.
-
 This specification defines the server side of the Tachyon payment protocol's
 private-retrieval layer: four PIR databases, the publisher that builds them and
-the query host that serves them. It is written to be implemented directly. It
-mirrors the designs in `wallet-pir` (`../wallet-pir`, revision `40b0ba6a`)
-wherever they fit, and says so where it departs from them.
+the query host that serves them. It mirrors the designs in `valargroup/wallet-pir`
+(revision `40b0ba6a`) wherever they fit, and says so where it departs from them.
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
@@ -14,7 +11,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 | Source | What this spec takes from it |
 |---|---|
-| The Tachyon Book, "A Deep Dive on Tachyon", section "Payment Protocol" (`../revisit.html#payment`) | The four databases, tag derivation, address shape, the wallet's sync and recovery procedures |
+| The Tachyon Book, "A Deep Dive on Tachyon", section "Payment Protocol" | The four databases, tag derivation, address shape, the wallet's sync and recovery procedures |
 | `tachyon-zcash/tachyon` book, `bundle.md`, `tachygrams.md`, `anchor.md` | Bundle wire format, the `vMemoTachyon` field, stamps, tachygrams, epochs |
 | Draft Tachyon ZIPs (`tachyon-zcash/zips` pull request 5, open, last updated 2026-10-21): bundle format, shielded protocol, NuTachyon upgrade | Consensus limits and encodings: action and tachygram counts, tachygram ordering and uniqueness, anchor acceptance, epoch numbering |
 | Tachyon alpha testnet (`https://tachyscan.cnode.phd`, JSON-RPC `http://tachyscan.cnode.phd:18232`) | The chain the services ingest; observed data shapes and volumes (section 3) |
@@ -1081,7 +1078,7 @@ Stamp        = Proof { anchor, tachygram_set, tachygrams: Vec<[u8; 32]> }
 - `activation_height` is read from `getblockchaininfo.upgrades` by the name
   `NuTachyon`. If the upgrade is absent the publisher refuses to start.
 - The decoder reads the JSON form. A raw-transaction decoder using the
-  `zcash_tachyon` crate is a later hardening step (milestone M4), needed
+  `zcash_tachyon` crate is a later hardening step, needed
   because the JSON shape is not a stable contract.
 
 ### 11.2 Ingestion
@@ -1448,21 +1445,7 @@ Modelled on `wallet-pir/docs/status/status_qualification.md`. Per product:
 
 Passing automated checks is not a qualification certificate.
 
-## 14. Milestones
-
-| Milestone | Delivers | Exit criterion |
-|---|---|---|
-| M0 | Workspace, toolchain, CI gates, `tachyon-chain`, node double | Golden decoder tests pass on frozen testnet blocks |
-| M1 | `tachyon-pir-table`, `tachyon-pir-protocol`, tachygram product end to end, probe client | Scenarios 1–4, 6, 8–13 for tachygram; scenario 15 |
-| M2 | Envelope parser, memo and first-contact products, synthetic envelope generator | Scenarios 1–13 for both |
-| M3 | Registry product with write API | Scenarios 1–4, 6, 10–14 for registry |
-| M4 | Raw-transaction decoder, retention, deployment packaging, qualification runs | Section 13.3 for all four products |
-
-Tachygram comes first because it is the only product with real data on the
-testnet today. Memo and first-contact can be proven only on synthetic chains
-until wallets publish envelopes.
-
-## 15. Constants
+## 14. Constants
 
 | Constant | Value | Status |
 |---|---:|---|
@@ -1493,7 +1476,7 @@ until wallets publish envelopes.
 | `max_unconfirmed_seconds` (default) | 600 | Configuration (section 11.6) |
 | `GEOMETRY` (published) | `tachyon-4k8` | Version 1 (section 6.1) |
 
-## 16. Open decisions
+## 15. Open decisions
 
 Each has a provisional answer in this document so that work can start.
 
@@ -1502,21 +1485,20 @@ Each has a provisional answer in this document so that work can start.
 | D1 | Envelope format, ciphertext size, ML-KEM level | Section 5; 128-byte ciphertext; ML-KEM-768 | Payment-protocol authors |
 | D2 | Tachygram record contents | Decided: 40 bytes, `action_count` removed, `anchor_height` defined as `stamp_ordinal` (section 8.1). Revisit when a wallet design exists | This project |
 | D3 | Registry chunk size and how a sender learns the chunk | 3,072 entries; chunk id in the short address | Payment-protocol authors |
-| D4 | Table design for the 1,232-byte products | Single table at one entry per row; Receiver's directory-plus-companion if the 17% fill is too costly | Implementers, after M3 measurements |
+| D4 | Table design for the 1,232-byte products | Single table at one entry per row; Receiver's directory-plus-companion if the 17% fill is too costly | Implementers, after qualification measurements |
 | D5 | Publisher discovery identity | Inherit `pir-publisher`'s service name and version through `run_registered` | `wallet-pir` maintainers |
 | D6 | How the wallet obtains a stamp's full tachygram set for witness construction | Not served by these products; the wallet fetches the block | Payment-protocol authors |
 
-## 17. Risks
+## 16. Risks
 
-- **Dependency access.** Whether `valargroup/wallet-pir` and
-  `valargroup/ipir-sp` can be fetched as git dependencies by every builder was
-  not checked. M0 must confirm it.
+- **Dependency access.** `valargroup/wallet-pir` and `valargroup/ipir-sp` are
+  fetched as pinned git dependencies.
 - **Testnet drift.** The alpha testnet's JSON shape and tachygram counts
   already differ from the Tachyon book and the draft ZIPs. The decoder is the
   only component exposed to that, and golden fixtures will show when it moves.
 - **Transaction format is unsettled.** The draft ZIPs leave the transaction
   version and the bundle's placement open (ZIP 248 registration is pending).
-  This affects only the raw-transaction decoder planned for M4.
+  This affects only a future raw-transaction decoder.
 - **Profile sizes are borrowed.** Query, reply and memory figures are
   `wallet-pir` measurements for a different entry layout. They are planning
   numbers until re-measured here.

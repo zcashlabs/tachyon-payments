@@ -1,6 +1,6 @@
 # Registry protocol
 
-Status: specified, not implemented. The contract is the
+The contract is the
 [spec](../spec/spec-tachyon-payment-pir.md); common rules are in
 [shared](../shared/README.md).
 

@@ -1,5 +1,5 @@
 //! Diagnostic probe client for the Tachyon payment PIR services (spec
-//! `docs/spec/spec-tachyon-payment-pir.md`, sections 2, 4.2, 10, 12.1, 14 M1).
+//! `docs/spec/spec-tachyon-payment-pir.md`, sections 2, 4.2, 10, 12.1).
 //!
 //! A testing and diagnostics tool, and the "wallet" of the end-to-end tests.
 //! It speaks the wallet-facing protocol of all four products over one mount

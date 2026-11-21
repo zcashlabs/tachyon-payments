@@ -1,8 +1,8 @@
 //! Registry wire types (spec 9.1-9.3): address and digest, the challenge and
 //! registration JSON, proof of work and the registration body.
 //!
-//! The `pk` and `ek` validity checks and the HMAC challenges are the
-//! publisher's (milestone M3) and are not here.
+//! The `pk` and `ek` validity checks and the HMAC challenges live in the
+//! publisher and are not here.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

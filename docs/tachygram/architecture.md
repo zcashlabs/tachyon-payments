@@ -1,6 +1,6 @@
 # Tachygram architecture
 
-Status: specified, not implemented.
+Status: implemented.
 
 ```
 Zakura node ─▶ tachyon-chain ─▶ tachygram-publisher (ingestion) ─▶ tachygram-store (tachygram-v1.sqlite)

@@ -1,8 +1,7 @@
 # First-contact protocol
 
-Status: specified, not implemented. The contract is the
-[spec](../spec/spec-tachyon-payment-pir.md); common rules are in
-[shared](../shared/README.md).
+The contract is the [spec](../spec/spec-tachyon-payment-pir.md); common rules
+are in [shared](../shared/README.md).
 
 ## Source (spec 5)
 
@@ -36,7 +35,7 @@ row    = u32_le(h[0..4]) mod rows
 
 The single-table design at one entry per row fills about 17% of the table. If
 that proves too costly, wallet-pir's Receiver directory-plus-companion design is
-the fallback (decision D4, after M3 measurements).
+the fallback (decision D4).
 
 ## Span rule (spec 7.2)
 

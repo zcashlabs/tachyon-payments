@@ -1,4 +1,4 @@
-//! The synthetic envelope generator (spec sections 4.2 and 5; milestone M2).
+//! The synthetic envelope generator (spec sections 4.2 and 5).
 //!
 //! Envelopes are **authored** here, as values, and encoded into `vMemoTachyon`
 //! bytes by this module's own writer, straight from spec section 5.1. Nothing

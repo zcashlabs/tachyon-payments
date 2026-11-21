@@ -9,8 +9,7 @@ documents and the spec disagree, the spec wins and the document is wrong.
 - [Tachyon payment-protocol PIR services](spec/spec-tachyon-payment-pir.md):
   scope, chain facts, architecture, the on-chain envelope, the bucket-row
   table, the four products, the wallet-facing protocol, publication and
-  consistency, trust and privacy, testing, milestones, constants and open
-  decisions.
+  consistency, trust and privacy, testing, constants and open decisions.
 
 ## Products
 
@@ -32,10 +31,7 @@ spec 13.3 gate and its status) and `CHANGELOG.md`.
 - [Shared libraries and the common design](shared/README.md): `tachyon-chain`,
   `tachyon-pir-protocol`, `tachyon-pir-table`, the bucket-row table, the
   publication model and the query host.
-- [Integrating with wallet-pir](shared/wallet-pir-integration.md): how the
-  spec's crates use `wallet-pir`'s libraries and the PIR engine.
 
 ## Elsewhere
 
-- [Evidence](../evidence/README.md): qualification and measurement records.
 - [Development rules and gates](../AGENTS.md).

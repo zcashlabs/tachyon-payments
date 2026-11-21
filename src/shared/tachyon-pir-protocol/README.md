@@ -14,7 +14,7 @@ or server dependencies. It depends only on `zakura-pir-protocol` (feature
 defines its own 32-byte types instead of using `tachyon-chain`.
 
 Not here: table building, seed search and segmenting (`tachyon-pir-table`),
-and the registry's `pk`/`ek` checks and HMAC challenges (publisher side, M3).
+and the registry's `pk`/`ek` checks and HMAC challenges (publisher side).
 
 ## API
 

@@ -1,6 +1,6 @@
 # Memo protocol
 
-Status: specified, not implemented. The contract is the
+The contract is the
 [spec](../spec/spec-tachyon-payment-pir.md); this page collects what applies to
 memo. Common rules are in [shared](../shared/README.md).
 

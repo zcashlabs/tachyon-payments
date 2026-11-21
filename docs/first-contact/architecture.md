@@ -1,6 +1,6 @@
 # First-contact architecture
 
-Status: specified, not implemented.
+Status: implemented.
 
 First-contact has no crates of its own. It is built by the memo crates and
 counts as the memo product family for the dependency rules (spec 4.2).

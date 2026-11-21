@@ -1,7 +1,7 @@
 # tachyon-pir-cli
 
 The diagnostic probe client of the Tachyon payment PIR services (spec
-`docs/spec/spec-tachyon-payment-pir.md`, sections 2, 4.2 and 14 M1). A tool for
+`docs/spec/spec-tachyon-payment-pir.md`, sections 2 and 4.2). A tool for
 testing and diagnostics, and the "wallet" of the end-to-end tests. It is not
 the wallet client library (spec 2, out of scope): it decrypts nothing and keeps
 no sync state.
