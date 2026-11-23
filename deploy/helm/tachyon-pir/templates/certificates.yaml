@@ -1,0 +1,81 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-internal-ca
+spec:
+  isCA: true
+  commonName: {{ .Release.Name }}-internal-ca
+  secretName: {{ .Release.Name }}-internal-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ .Release.Name }}-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-internal-ca
+spec:
+  ca:
+    secretName: {{ .Release.Name }}-internal-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-publisher-tls
+spec:
+  isCA: false
+  secretName: {{ .Release.Name }}-publisher-tls
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - {{ .Release.Name }}-publisher
+    - {{ .Release.Name }}-publisher.{{ .Release.Namespace }}.svc
+    - {{ .Release.Name }}-publisher.{{ .Release.Namespace }}.svc.cluster.local
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: {{ .Release.Name }}-internal-ca
+    kind: Issuer
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-letsencrypt
+spec:
+  acme:
+    server: {{ .Values.ingress.acmeServer | quote }}
+    privateKeySecretRef:
+      name: {{ .Release.Name }}-acme-account
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: {{ .Values.ingress.cloudflareSecretName | quote }}
+              key: {{ .Values.ingress.cloudflareSecretKey | quote }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-public-tls
+spec:
+  secretName: {{ .Release.Name }}-public-tls
+  dnsNames:
+    - {{ .Values.ingress.host | quote }}
+  issuerRef:
+    name: {{ .Release.Name }}-letsencrypt
+    kind: Issuer
+{{- end }}

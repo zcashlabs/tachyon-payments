@@ -1,0 +1,4 @@
+*
+!target/release/tachyon-pir-publisher
+!target/release/tachyon-pir-query-server
+!target/release/tachyon-pir-cli

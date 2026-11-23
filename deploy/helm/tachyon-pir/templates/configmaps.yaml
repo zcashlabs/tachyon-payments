@@ -1,0 +1,147 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  publisher.json: |
+    {
+      "management_listen": "127.0.0.1:9400",
+      "chain": {
+        "rpc_url": {{ .Values.chain.rpcUrl | quote }},
+        "no_auth": {{ .Values.chain.noAuth }},
+        "poll_ms": {{ .Values.chain.pollMs }},
+        "epoch_length": {{ .Values.chain.epochLength }}
+      },
+      "memo": {
+        "enabled": true,
+        "settings": {
+          "listen": "127.0.0.1:9401",
+          "state_dir": "/data/pub-memo"
+        }
+      },
+      "first_contact": {
+        "enabled": true,
+        "settings": {}
+      },
+      "tachygram": {
+        "enabled": true,
+        "settings": {
+          "listen": "127.0.0.1:9402",
+          "state_dir": "/data/pub-tachygram"
+        }
+      },
+      "registry": {
+        "enabled": true,
+        "settings": {
+          "listen": "127.0.0.1:9403",
+          "state_dir": "/data/pub-registry",
+          "difficulty_bits": {{ .Values.registry.difficultyBits }}
+        }
+      }
+    }
+
+  Caddyfile: |
+    {
+      admin off
+      auto_https off
+    }
+
+    :8443 {
+      tls /etc/tachyon-pir/tls/tls.crt /etc/tachyon-pir/tls/tls.key
+
+      handle /.well-known/pir-service-discovery {
+        reverse_proxy 127.0.0.1:9400
+      }
+      handle /provider/memo/* {
+        reverse_proxy 127.0.0.1:9401
+      }
+      handle /provider/first-contact/* {
+        reverse_proxy 127.0.0.1:9401
+      }
+      handle /provider/tachygram/* {
+        reverse_proxy 127.0.0.1:9402
+      }
+      handle /provider/registry/* {
+        reverse_proxy 127.0.0.1:9403
+      }
+      handle /registry/* {
+        reverse_proxy 127.0.0.1:9403
+      }
+      handle {
+        respond 404
+      }
+    }
+
+    :8080 {
+      handle /registry/v1/challenge {
+        reverse_proxy 127.0.0.1:9403
+      }
+      handle /registry/v1/register {
+        reverse_proxy 127.0.0.1:9403
+      }
+      handle {
+        respond 404
+      }
+    }
+
+  query.json: |
+    {
+      "management_listen": "127.0.0.1:9500",
+      "public_listen": "__POD_IP__:9510",
+      "memo": {
+        "enabled": true,
+        "settings": {
+          "publisher": "https://{{ .Release.Name }}-publisher:8443",
+          "publisher_ca": "/etc/tachyon-pir/ca/ca.crt",
+          "state_dir": "/data/query-memo",
+          "role": "combined",
+          "publisher_network": {{ .Values.chain.network | quote }},
+          "publisher_genesis": {{ .Values.chain.genesisHash | quote }},
+          "activation_height": {{ .Values.chain.activationHeight }},
+          "epoch_length": {{ .Values.chain.epochLength }},
+          "retain_scopes": {{ .Values.queryServer.retainScopes.memo }},
+          "poll_ms": {{ .Values.queryServer.pollMs }}
+        }
+      },
+      "first_contact": {
+        "enabled": true,
+        "settings": {
+          "publisher": "https://{{ .Release.Name }}-publisher:8443",
+          "publisher_ca": "/etc/tachyon-pir/ca/ca.crt",
+          "state_dir": "/data/query-first-contact",
+          "role": "combined",
+          "publisher_network": {{ .Values.chain.network | quote }},
+          "publisher_genesis": {{ .Values.chain.genesisHash | quote }},
+          "activation_height": {{ .Values.chain.activationHeight }},
+          "epoch_length": {{ .Values.chain.epochLength }},
+          "poll_ms": {{ .Values.queryServer.pollMs }}
+        }
+      },
+      "tachygram": {
+        "enabled": true,
+        "settings": {
+          "publisher": "https://{{ .Release.Name }}-publisher:8443",
+          "publisher_ca": "/etc/tachyon-pir/ca/ca.crt",
+          "state_dir": "/data/query-tachygram",
+          "role": "combined",
+          "publisher_network": {{ .Values.chain.network | quote }},
+          "publisher_genesis": {{ .Values.chain.genesisHash | quote }},
+          "activation_height": {{ .Values.chain.activationHeight }},
+          "epoch_length": {{ .Values.chain.epochLength }},
+          "retain_scopes": {{ .Values.queryServer.retainScopes.tachygram }},
+          "poll_ms": {{ .Values.queryServer.pollMs }}
+        }
+      },
+      "registry": {
+        "enabled": true,
+        "settings": {
+          "publisher": "https://{{ .Release.Name }}-publisher:8443",
+          "publisher_ca": "/etc/tachyon-pir/ca/ca.crt",
+          "state_dir": "/data/query-registry",
+          "role": "combined",
+          "publisher_network": {{ .Values.chain.network | quote }},
+          "publisher_genesis": {{ .Values.chain.genesisHash | quote }},
+          "poll_ms": {{ .Values.queryServer.pollMs }}
+        }
+      }
+    }

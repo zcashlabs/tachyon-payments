@@ -1,0 +1,55 @@
+image:
+  repository: zecstack.local/tachyon-pir
+  tag: "0.1.0"
+  pullPolicy: Never
+
+nodeSelector:
+  kubernetes.io/hostname: ovh-nixos-fra
+
+# Chain configuration (defaults to Tachyon alpha testnet at tachyscan.cnode.phd)
+chain:
+  network: test
+  rpcUrl: "http://tachyscan.cnode.phd:18232"
+  noAuth: true
+  genesisHash: "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38"
+  activationHeight: 8
+  epochLength: 4096
+  pollMs: 1000
+
+registry:
+  difficultyBits: 20
+
+publisher:
+  storage:
+    size: 20Gi
+    storageClassName: local-path
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+
+queryServer:
+  pollMs: 1000
+  retainScopes:
+    memo: 64
+    tachygram: 64
+  storage:
+    size: 30Gi
+    storageClassName: local-path
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 20Gi
+
+ingress:
+  enabled: true
+  host: pir.tachyon.fastz.cash
+  cloudflareSecretName: zecstack-cloudflare
+  cloudflareSecretKey: api-token
+  acmeServer: https://acme-v02.api.letsencrypt.org/directory

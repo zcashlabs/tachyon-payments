@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-query
+spec:
+  selector:
+    app.kubernetes.io/name: tachyon-pir-query-server
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: public
+      port: 9510
+      targetPort: 9510
+    - name: management
+      port: 9500
+      targetPort: 9500
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-query
+spec:
+  serviceName: {{ .Release.Name }}-query
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tachyon-pir-query-server
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tachyon-pir-query-server
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: query-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - sed "s/__POD_IP__/${POD_IP}/g" /etc/tachyon-pir/query.json > /tmp/query.json && exec /usr/local/bin/tachyon-pir-query-server --config /tmp/query.json
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: public
+              containerPort: 9510
+            - name: management
+              containerPort: 9500
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.queryServer.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["curl", "-fsS", "http://127.0.0.1:9500/health"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["curl", "-fsS", "http://127.0.0.1:9500/ready"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tachyon-pir/query.json
+              subPath: query.json
+              readOnly: true
+            - name: ca
+              mountPath: /etc/tachyon-pir/ca
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+        - name: ca
+          secret:
+            secretName: {{ .Release.Name }}-internal-ca
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.queryServer.storage.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.queryServer.storage.size }}

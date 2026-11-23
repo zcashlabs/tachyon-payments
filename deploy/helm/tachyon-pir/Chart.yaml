@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tachyon-pir
+description: Tachyon payment-protocol PIR publisher and query server (memo, first-contact, tachygram, registry)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
