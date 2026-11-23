@@ -23,6 +23,7 @@ export default defineConfig({
   ],
   topNav: [
     { text: 'Quickstart', link: '/quickstart' },
+    { text: 'Wallet Tutorial', link: '/wallet-tutorial' },
     { text: 'Operator Guide', link: '/operator/building' },
     { text: 'Products', link: '/products/memo' },
     {
@@ -37,6 +38,7 @@ export default defineConfig({
         { text: 'Introduction', link: '/' },
         { text: 'Architecture', link: '/architecture' },
         { text: 'Local Regtest Quickstart', link: '/quickstart' },
+        { text: 'Wallet Tutorial (zcash-devtool)', link: '/wallet-tutorial' },
       ],
     },
     {
