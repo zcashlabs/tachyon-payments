@@ -38,6 +38,7 @@ spec:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       securityContext:
         fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: publisher
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
